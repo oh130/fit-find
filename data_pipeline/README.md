@@ -11,6 +11,10 @@ It produces the processed files used by search and recommendation experiments.
 
 ## Files
 
+- `build_item_master.py`
+  - builds the core item master table used for persona scoring and simulation
+- `build_customer_purchase_profile.py`
+  - builds the customer-level purchase summary table used for persona scoring
 - `build_customer_features.py`
   - builds `data/processed/customer_features.csv`
 - `build_article_features.py`
@@ -55,10 +59,14 @@ MODE = "test"
 ## Output Files
 
 Common outputs:
+- `data/processed/item_master.csv`
+- `data/processed/customer_purchase_profile.csv`
 - `data/processed/customer_features.csv`
 - `data/processed/articles_feature.csv`
 
 Test mode outputs:
+- `data/processed/item_master_test.csv`
+- `data/processed/customer_purchase_profile_test.csv`
 - `data/processed/item_features_test.csv`
 - `data/processed/train_data_test.csv`
 - `data/processed/candidate_user_features_test.csv.gz`
@@ -85,6 +93,8 @@ If you want to run each script manually, use this order:
 ```bash
 python data_pipeline/build_customer_features.py
 python data_pipeline/build_article_features.py
+python data_pipeline/build_item_master.py
+python data_pipeline/build_customer_purchase_profile.py
 python data_pipeline/build_item_features.py
 python data_pipeline/build_ranking_train_data.py
 python data_pipeline/build_candidate_training_data.py
@@ -94,6 +104,8 @@ python data_pipeline/build_candidate_training_data.py
 
 - Run commands from the repository root.
 - Keep raw CSV files local only; do not commit them.
+- `build_item_master.py` creates the item-level canonical table used by persona scoring and simulation.
+- `build_customer_purchase_profile.py` creates the customer-level purchase summary table used to derive persona ratios.
 - `build_ranking_train_data.py` expects `customer_features.csv` and `articles_feature.csv` to exist first.
 - The ranking dataset is purchase-based and uses sampled negatives rather than impression logs.
 - `build_candidate_training_data.py` creates a positive-interaction dataset with richer aggregate user/item features for candidate retrieval training.

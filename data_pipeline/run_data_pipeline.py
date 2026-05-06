@@ -40,6 +40,8 @@ OUTPUT_DIR: Path = CONFIG["OUTPUT_DIR"]
 PIPELINE_STEPS = [
     DATA_PIPELINE_DIR / "build_customer_features.py",
     DATA_PIPELINE_DIR / "build_article_features.py",
+    DATA_PIPELINE_DIR / "build_item_master.py",
+    DATA_PIPELINE_DIR / "build_customer_purchase_profile.py",
     DATA_PIPELINE_DIR / "build_item_features.py",
     DATA_PIPELINE_DIR / "build_ranking_train_data.py",
     DATA_PIPELINE_DIR / "build_candidate_training_data.py",
