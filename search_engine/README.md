@@ -1,25 +1,60 @@
-# Multimodal Search Engine
+# Search Engine
 
-CLIP 기반의 멀티모달 검색 엔진입니다.
-텍스트와 이미지를 같은 임베딩 공간에 매핑한 뒤, FAISS HNSW 인덱스를 이용해 유사한 상품을 검색합니다.
+이 디렉토리는 멀티모달 검색 엔진 서비스 구현을 포함한다.  
+검색 엔진은 OpenAI CLIP(`openai/clip-vit-base-patch32`)으로 텍스트/이미지를 임베딩하고, FAISS HNSW 인덱스를 통해 Top-K 유사 상품을 반환한다.
 
-이 검색 엔진은 다음 두 가지 모드를 지원합니다.
+## 구현 범위
 
-* `test` 모드: 코드 내부 더미 데이터로 검색
-* `production` 모드: H&M Kaggle dataset 기반 검색 (현재 기능이 불완전할 수 있음)
+- 텍스트 검색: CLIP Text Encoder 사용
+- 이미지 검색: CLIP Image Encoder 사용
+- 하이브리드 검색: 텍스트+이미지 임베딩 평균 결합
+- 벡터 검색: FAISS HNSW
+- 응답 형식: 프로젝트 명세의 검색 API 필수 필드 준수
 
-현재 작성한 코드는 기본값이 `test`입니다. 전처리된 데이터 기반으로 검색하고 싶다면 production 모드를 사용하면 됩니다.
+## 주요 파일
 
----
+- [app.py](/C:/Users/user/multimodal-search/search_engine/app.py)
+  검색 API 서버. `/search`, `/health` 엔드포인트를 제공한다.
+- [search_engine.py](/C:/Users/user/multimodal-search/search_engine/search_engine.py)
+  CLIP 임베딩, 상품 인덱싱, FAISS 검색 로직을 포함한다.
+- [generate_search_metrics_report.py](/C:/Users/user/multimodal-search/search_engine/generate_search_metrics_report.py)
+  검색 성능 평가셋 생성, API 호출, MRR/NDCG/지연시간 측정, JSON 리포트 저장.
+- [evaluate_search_engine.py](/C:/Users/user/multimodal-search/search_engine/evaluate_search_engine.py)
+  평가셋 CSV를 입력으로 받아 검색 API를 측정하는 범용 평가 스크립트.
 
-## API 규약
+## 실행 모드
 
-### 검색
+검색 엔진은 두 가지 모드를 지원한다.
 
-* 포트: `8002`
-* `POST /search`
+- `test`
+  500개 샘플 기반 인덱스 또는 더미 상품으로 빠르게 실행한다.
+- `production`
+  H&M 전처리 결과를 기반으로 전체 상품 인덱스를 구성한다.
 
-#### 요청 형식
+현재 컨테이너 실행 시 모드는 `SEARCH_ENGINE_MODE` 환경변수로 제어된다.
+
+## 입력 데이터
+
+검색 엔진은 다음 전처리 결과를 사용한다.
+
+- 원본 데이터:
+  - `data/raw/articles.csv`
+  - `data/raw/customers.csv`
+  - `data/raw/transactions_train.csv`
+- 검색용 전처리 결과:
+  - `data/processed/articles_feature.csv`
+- 인덱스 캐시:
+  - `data/faiss_index/search_test.index`
+  - `data/faiss_index/search_test_metadata.json`
+  - `data/faiss_index/search.index`
+  - `data/faiss_index/search_metadata.json`
+
+## API 규격
+
+- 포트: `8002`
+- 엔드포인트: `POST /search`
+
+요청 예시:
 
 ```json
 {
@@ -29,228 +64,172 @@ CLIP 기반의 멀티모달 검색 엔진입니다.
 }
 ```
 
-* `query`: 검색어 문자열
-* `image_base64`: base64로 인코딩된 이미지 문자열 또는 `null`
-* `top_k`: 반환할 결과 개수
-
-#### 응답 형식
+응답 필수 필드:
 
 ```json
 {
   "search_type": "text",
   "results": [
     {
-      "product_id": "100001",
-      "name": "Blue Denim Jacket",
-      "score": 0.9231,
-      "price": 79.9
+      "product_id": "0825137001",
+      "name": "SABLE denim jacket",
+      "score": 0.794,
+      "price": 0.0
     }
   ],
-  "latency_ms": 12.34,
-  "total_count": 1
+  "latency_ms": 42.0,
+  "total_count": 10
 }
 ```
 
-#### 응답 필수 필드
+`search_type`은 다음 중 하나다.
 
-* `search_type`: `"text"` | `"image"` | `"hybrid"`
-* `results`: 검색 결과 배열
-* `latency_ms`: 응답 시간(ms)
-* `total_count`: 반환된 결과 개수
-
-각 `results` 항목은 다음 필드를 포함합니다.
-
-* `product_id`
-* `name`
-* `score`
-* `price`
-
----
-
-## 디렉토리 구조
-
-```text
-search_engine_sample/
-├── app.py
-├── search_engine.py
-├── Dockerfile
-├── requirements.txt
-└── README.md
-```
-
----
-
-## 각 파일의 역할
-
-### `search_engine.py`
-* OpenAI CLIP 모델을 이용한 텍스트/이미지 임베딩
-* 상품 메타데이터 로딩
-* H&M 데이터셋 또는 더미 데이터 기반 인덱스 구축
-* FAISS HNSW 검색
-* 검색 결과를 API 응답 형식으로 변환
-
-### `app.py`
-* `POST /search` 요청 처리
-* 검색 엔진 호출
-* JSON 응답 반환
-* 서버 실행 진입점 제공
-
-### `Dockerfile`
-* Python 환경 설정
-* 필요한 패키지 설치
-* 소스 코드 복사
-* FastAPI 서버 실행
-
-### `requirements.txt`
-
-프로젝트 실행에 필요한 Python 패키지 목록
-
-예시 패키지:
-
-* `fastapi`
-* `uvicorn`
-* `torch`
-* `transformers`
-* `faiss-cpu`
-* `numpy`
-* `pandas`
-* `Pillow`
-
----
-
-## 실행 방법
-
-### 1. 디렉토리 이동
-
-```bash
-cd search_engine
-```
-
-### 2. 패키지 설치
-
-```bash
-pip install -r requirements.txt
-```
-
----
+- `text`
+- `image`
+- `hybrid`
 
 ## 로컬 실행
 
-### 검색 엔진 확인
+### 1. 패키지 설치
 
-```bash
-python search_engine.py
+```powershell
+pip install -r .\search_engine\requirements.txt
 ```
 
-이 명령은 검색 엔진이 정상적으로 인덱스를 만들고 샘플 검색을 수행하는지 확인합니다.
+### 2. 검색 엔진 서버 실행
 
-### API 서버 실행
-
-```bash
-python app.py
+```powershell
+$env:SEARCH_ENGINE_MODE="test"
+python .\search_engine\app.py
 ```
 
-또는 다음과 같이 실행할 수 있습니다.
+기본 확인:
 
-```bash
-uvicorn app:app --host 0.0.0.0 --port 8002
+```powershell
+Invoke-WebRequest -Uri http://localhost:8002/health -UseBasicParsing | Select-Object -Expand Content
 ```
 
-실행 후 다음 주소로 접근합니다.
+### 3. 검색 API 호출 예시
 
-* `http://localhost:8002/search`
+```powershell
+$body = @{
+  query = "blue jacket"
+  image_base64 = $null
+  top_k = 10
+} | ConvertTo-Json
 
----
-
-## 모드 설정
-
-기본값은 `test` 모드입니다.
-
-```python
-mode: str = "test",        # 기본
-# mode: str = "production",  # 최종용
+Invoke-WebRequest `
+  -Uri http://localhost:8002/search `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body $body `
+  -UseBasicParsing | Select-Object -Expand Content
 ```
-
-### `test` 모드
-* 코드 내부의 더미 데이터로 검색 (초안 구현 완료)
-
-### `production` 모드
-* `data/` 디렉토리의 CSV 파일과 상품 이미지를 활용하여 검색
-
----
 
 ## Docker 실행
 
-### 빌드
+프로젝트 루트에서:
 
-프로젝트 루트에서 실행합니다.
-
-```bash
-docker build -t multimodal-search -f search_engine_sample/Dockerfile .
+```powershell
+docker-compose up --build
 ```
 
-### 실행
+접속 주소:
 
-기본 `test` 모드:
+- 검색 엔진: [http://localhost:8002](http://localhost:8002)
+- Swagger UI: [http://localhost:8002/docs](http://localhost:8002/docs)
+- API Gateway: [http://localhost:8000](http://localhost:8000)
+- 평가 대시보드: [http://localhost:8501](http://localhost:8501)
 
-```bash
-docker run --rm -p 8002:8002 -e MODE=test multimodal-search
+## 검색 성능 지표 측정
+
+검색 성능은 다음 항목을 측정한다.
+
+- `HitRate@10`
+- `MRR`
+- `NDCG@10`
+- 평균 API latency
+- 평균 wall latency
+- P95 wall latency
+
+명세 기준 목표:
+
+- 검색 응답 시간 `<= 200ms`
+- `MRR >= 0.55`
+- `NDCG@10 >= 0.50`
+
+### 방법 1. 평가 리포트 생성
+
+검색 엔진 서버가 `localhost:8002`에서 실행 중일 때:
+
+```powershell
+python .\search_engine\generate_search_metrics_report.py --endpoint http://localhost:8002/search
 ```
 
-`production` 모드:
+생성 결과:
 
-```bash
-docker run --rm -p 8002:8002 -e MODE=production multimodal-search
+- 평가셋 CSV: [search_eval_set.csv](/C:/Users/user/multimodal-search/evaluation/search_eval_set.csv)
+- 검색 리포트 JSON: [search_metrics_report.json](/C:/Users/user/multimodal-search/evaluation/search_metrics_report.json)
+
+콘솔에는 다음 정보가 출력된다.
+
+- 샘플 수
+- `HitRate@10`
+- `MRR`
+- `NDCG@10`
+- 평균 지연시간
+- 목표 통과 여부
+
+### 방법 2. 평가 CSV를 이용한 재측정
+
+이미 생성된 평가셋 CSV를 이용해서 다시 측정하려면:
+
+```powershell
+python .\search_engine\evaluate_search_engine.py --endpoint http://localhost:8002/search
 ```
 
----
+기본 입력 파일은 `evaluation/search_eval_set.csv`다.
 
-## 요청 예시
+## 대시보드에서 검색 성능 확인
 
-### 텍스트만 검색
+검색 성능 리포트를 생성한 뒤:
 
-```bash
-curl -X POST "http://localhost:8002/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"summer dress","image_base64":null,"top_k":10}'
-```
+1. `docker-compose up --build`로 대시보드를 실행한다.
+2. 브라우저에서 [http://localhost:8501](http://localhost:8501)에 접속한다.
+3. 상단의 `Search Engine Quality` 섹션에서 다음을 확인한다.
 
-### 이미지 + 텍스트 검색
+- Samples
+- MRR
+- nDCG@10
+- Avg latency
+- P95 latency
+- 목표 통과 여부 표
 
-```json
-{
-  "query": "black shoes",
-  "image_base64": "<base64 encoded image>",
-  "top_k": 10
-}
-```
+대시보드는 호스트의 `evaluation/search_metrics_report.json`을 직접 읽도록 연결되어 있으므로, 리포트를 새로 생성한 뒤 페이지를 새로고침하면 최신 결과가 반영된다.
 
-### 이미지만 검색
+## 최근 측정 예시
 
-```json
-{
-  "query": "",
-  "image_base64": "<base64 encoded image>",
-  "top_k": 10
-}
-```
+최근 생성된 검색 리포트 기준:
 
----
+- `Samples evaluated`: `101`
+- `MRR`: `0.7934`
+- `NDCG@10`: `0.7161`
+- `Avg wall latency`: 약 `33.20 ms`
+- `P95 wall latency`: 약 `50.27 ms`
 
-## 동작 흐름
+목표 달성 여부:
 
-1. 상품 데이터 로딩
-2. CLIP 임베딩 생성
-3. HNSW 인덱스 구축
-4. 사용자 쿼리 입력
-5. 텍스트/이미지/혼합 임베딩 계산
-6. 유사 상품 Top-K 반환
+- `Latency <= 200ms`: PASS
+- `MRR >= 0.55`: PASS
+- `NDCG@10 >= 0.50`: PASS
 
----
+## 현재 구현 메모
 
-## 참고 사항
-* `search_type`은 입력 형태에 따라 자동으로 결정됩니다.
-* `results`에는 `product_id`, `name`, `score`, `price`가 포함됩니다.
-* 검색 품질은 CLIP 임베딩과 인덱스 파라미터에 따라 달라질 수 있습니다.
-* `production` 모드에서는 H&M 데이터셋 파일 경로가 올바르게 배치되어 있어야 합니다.
+- `search_engine.py`는 self-contained하게 CLIP 로딩, 임베딩, FAISS 인덱싱, 검색까지 수행한다.
+- `app.py`는 서비스 레벨에서 인덱스 캐시를 활용해 기동 시간을 줄인다.
+- 테스트/평가 스크립트는 검색 엔진 코드를 크게 수정하지 않고 별도 파일로 분리했다.
 
+## 참고
+
+- 전체 시스템 아키텍처는 루트 [README.md](/C:/Users/user/multimodal-search/README.md)에 정리되어 있다.
+- 추천 성능 및 A/B 테스트 시각화는 `evaluation/streamlit_app.py`에서 함께 제공된다.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import json
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
@@ -24,6 +26,7 @@ DEFAULT_RELEVANT_LISTS = """[
 
 DEFAULT_CONTROL = "0,1,0,0,1,0,1,0,0,1"
 DEFAULT_TREATMENT = "1,1,0,1,1,0,1,1,0,1"
+SEARCH_REPORT_PATH = Path(__file__).resolve().with_name("search_metrics_report.json")
 
 
 def parse_nested_list(raw_text: str) -> list[list[str]]:
@@ -104,7 +107,7 @@ def load_ab_data_from_csv(uploaded_file) -> tuple[list[float], list[float], pd.D
 
 
 st.set_page_config(page_title="Ranking Metrics Dashboard", layout="wide")
-st.title("Ranking Metrics and A/B Test Dashboard")
+st.title("Search Engine, Ranking Metrics and A/B Test Dashboard")
 st.caption("HitRate, MRR, nDCG, p-value, confidence interval")
 
 with st.sidebar:
@@ -114,6 +117,77 @@ with st.sidebar:
     num_bootstrap = st.slider("Bootstrap samples", min_value=500, max_value=10000, value=3000, step=500)
     num_permutations = st.slider("Permutation samples", min_value=500, max_value=10000, value=3000, step=500)
 
+st.subheader("Search Engine Metrics")
+if SEARCH_REPORT_PATH.exists():
+    try:
+        report = json.loads(SEARCH_REPORT_PATH.read_text(encoding="utf-8"))
+        search_metrics = report.get("search", {})
+        checks = report.get("checks", {})
+        thresholds = report.get("thresholds", {})
+        metadata = report.get("metadata", {})
+        metric_k_value = int(metadata.get("metric_k", 10))
+        ndcg_metric_name = f"NDCG@{metric_k_value}"
+
+        search_cards = st.columns(5)
+        search_cards[0].metric("Samples", f"{metadata.get('samples_evaluated', 0)}")
+        search_cards[1].metric("MRR", f"{search_metrics.get('MRR', 0.0):.4f}")
+        search_cards[2].metric(
+            f"nDCG@{metric_k_value}",
+            f"{search_metrics.get(ndcg_metric_name, 0.0):.4f}",
+        )
+        search_cards[3].metric("Avg latency", f"{search_metrics.get('avg_wall_latency_ms', 0.0):.2f} ms")
+        search_cards[4].metric("P95 latency", f"{search_metrics.get('p95_wall_latency_ms', 0.0):.2f} ms")
+
+        status_df = pd.DataFrame(
+            [
+                {"metric": "MRR", "value": search_metrics.get("MRR", 0.0), "target": thresholds.get("mrr_min", 0.55)},
+                {
+                    "metric": f"nDCG@{metric_k_value}",
+                    "value": search_metrics.get(ndcg_metric_name, 0.0),
+                    "target": thresholds.get("ndcg_at_10_min", 0.50),
+                },
+                {
+                    "metric": "Latency(ms)",
+                    "value": search_metrics.get("avg_wall_latency_ms", 0.0),
+                    "target": thresholds.get("latency_ms_max", 200.0),
+                },
+            ]
+        )
+        status_df["passed"] = [
+            checks.get("mrr_meets_target", False),
+            checks.get("ndcg_meets_target", False),
+            checks.get("latency_within_200ms", False),
+        ]
+
+        chart_df = status_df[status_df["metric"] != "Latency(ms)"]
+        threshold_chart = (
+            alt.Chart(chart_df)
+            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+            .encode(
+                x=alt.X("metric:N", title=None),
+                y=alt.Y("value:Q", scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("passed:N", legend=None, scale=alt.Scale(domain=["True", "False"], range=["#2E8B57", "#C0392B"])),
+                tooltip=[
+                    "metric",
+                    alt.Tooltip("value:Q", format=".4f"),
+                    alt.Tooltip("target:Q", format=".4f"),
+                ],
+            )
+            .properties(height=240)
+        )
+        st.altair_chart(threshold_chart, use_container_width=True)
+        st.dataframe(status_df, use_container_width=True, hide_index=True)
+        st.caption(f"Report source: {SEARCH_REPORT_PATH.name}")
+    except Exception as error:
+        st.error(f"Search report error: {error}")
+else:
+    st.info(
+        "search_metrics_report.json not found. "
+        "Run `python .\\search_engine\\generate_search_metrics_report.py --endpoint http://localhost:8002/search` "
+        "and refresh this page after the JSON file is generated."
+    )
+
+st.divider()
 ranking_col, ab_col = st.columns(2)
 
 with ranking_col:
