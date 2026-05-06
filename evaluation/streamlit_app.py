@@ -158,24 +158,66 @@ if SEARCH_REPORT_PATH.exists():
             checks.get("ndcg_meets_target", False),
             checks.get("latency_within_200ms", False),
         ]
+        status_df["passed"] = status_df["passed"].map({True: "PASS", False: "FAIL"})
 
-        chart_df = status_df[status_df["metric"] != "Latency(ms)"]
-        threshold_chart = (
-            alt.Chart(chart_df)
+        quality_df = status_df[status_df["metric"] != "Latency(ms)"].copy()
+        latency_df = status_df[status_df["metric"] == "Latency(ms)"].copy()
+
+        quality_chart = (
+            alt.Chart(quality_df)
             .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
             .encode(
                 x=alt.X("metric:N", title=None),
                 y=alt.Y("value:Q", scale=alt.Scale(domain=[0, 1])),
-                color=alt.Color("passed:N", legend=None, scale=alt.Scale(domain=["True", "False"], range=["#2E8B57", "#C0392B"])),
+                color=alt.Color(
+                    "passed:N",
+                    legend=None,
+                    scale=alt.Scale(domain=["PASS", "FAIL"], range=["#2E8B57", "#C0392B"]),
+                ),
                 tooltip=[
                     "metric",
                     alt.Tooltip("value:Q", format=".4f"),
                     alt.Tooltip("target:Q", format=".4f"),
+                    alt.Tooltip("passed:N", title="status"),
                 ],
             )
             .properties(height=240)
         )
-        st.altair_chart(threshold_chart, use_container_width=True)
+
+        quality_target_rule = (
+            alt.Chart(quality_df)
+            .mark_rule(color="#2C3E50", strokeDash=[4, 4], strokeWidth=2)
+            .encode(y="target:Q", x="metric:N")
+        )
+
+        latency_chart = (
+            alt.Chart(latency_df)
+            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, color="#1F77B4")
+            .encode(
+                x=alt.X("metric:N", title=None),
+                y=alt.Y("value:Q", title="ms"),
+                tooltip=[
+                    "metric",
+                    alt.Tooltip("value:Q", format=".2f"),
+                    alt.Tooltip("target:Q", format=".2f"),
+                    alt.Tooltip("passed:N", title="status"),
+                ],
+            )
+            .properties(height=240)
+        )
+
+        latency_target_rule = (
+            alt.Chart(latency_df)
+            .mark_rule(color="#C0392B", strokeDash=[4, 4], strokeWidth=2)
+            .encode(y="target:Q")
+        )
+
+        search_chart_left, search_chart_right = st.columns(2)
+        with search_chart_left:
+            st.altair_chart(quality_chart + quality_target_rule, use_container_width=True)
+        with search_chart_right:
+            st.altair_chart(latency_chart + latency_target_rule, use_container_width=True)
+
         st.dataframe(status_df, use_container_width=True, hide_index=True)
         st.caption(f"Report source: {SEARCH_REPORT_PATH.name}")
     except Exception as error:
