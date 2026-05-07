@@ -13,7 +13,9 @@ import json
 import os
 import httpx
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from feature_store import RedisFeatureStore
@@ -23,6 +25,11 @@ SEARCH_URL = os.getenv("SEARCH_ENGINE_URL", "http://search-engine:8002")
 REC_URL = os.getenv("REC_MODELS_URL", "http://rec-models:8003")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+DEFAULT_IMAGE_ROOT = Path("/app/data/raw/images")
+LOCAL_IMAGE_ROOT = Path(__file__).resolve().parents[1] / "data" / "raw" / "images"
+IMAGE_ROOT = Path(os.getenv("IMAGE_ROOT", str(DEFAULT_IMAGE_ROOT)))
+if not IMAGE_ROOT.exists() and LOCAL_IMAGE_ROOT.exists():
+    IMAGE_ROOT = LOCAL_IMAGE_ROOT
 
 feature_store: RedisFeatureStore
 
@@ -35,6 +42,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="API Gateway", lifespan=lifespan)
+
+
+def image_path_for_article(article_id: str) -> Path:
+    normalized_id = article_id.strip()
+    if not normalized_id.isdigit() or len(normalized_id) < 3:
+        raise HTTPException(status_code=400, detail="Invalid article_id")
+    return IMAGE_ROOT / normalized_id[:3] / f"{normalized_id}.jpg"
 
 
 # ── 요청/응답 스키마 ──────────────────────────────────────────
@@ -139,6 +153,21 @@ async def events(req: EventRequest):
             pass  # rec-models가 아직 없어도 게이트웨이는 정상 응답
 
     return {"status": "ok"}
+
+
+@app.get("/api/images/{article_id}")
+async def get_image(article_id: str):
+    """Return a local H&M product image by article id."""
+
+    image_path = image_path_for_article(article_id)
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(
+        image_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/features/{user_id}")

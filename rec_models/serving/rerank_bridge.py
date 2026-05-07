@@ -158,6 +158,10 @@ def _pick_reason(row: dict[str, Any], exploration_reason: str | None = None) -> 
     return str(row.get("reason", "ranking_score"))
 
 
+def _image_url_for_article(article_id: str) -> str:
+    return f"/api/images/{article_id}"
+
+
 def select_exploration_candidates(
     remaining_candidates: pd.DataFrame,
     already_selected: pd.DataFrame,
@@ -353,12 +357,14 @@ def rerank_recommendations(
 
     recommendations: list[dict[str, Any]] = []
     for row in final_ranked.to_dict(orient="records"):
+        product_id = str(row.get("article_id", ""))
         recommendations.append(
             {
-                "product_id": str(row.get("article_id", "")),
+                "product_id": product_id,
                 "score": float(row.get("score", 0.0)),
                 "reason": _pick_reason(row),
                 "is_exploration": bool(row.get("is_exploration", False)),
+                "image_url": _image_url_for_article(product_id),
             }
         )
     return recommendations

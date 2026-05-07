@@ -45,6 +45,10 @@ search_engine: MultimodalSearchEngine
 product_metadata: dict[str, dict[str, Any]] = {}
 
 
+def image_url_for_article(article_id: str) -> str:
+    return f"/api/images/{article_id}"
+
+
 def _embed_df(engine: MultimodalSearchEngine, df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     """engine.embedder로 DataFrame을 임베딩하고 FAISS 인덱스를 빌드한다."""
     embeddings: list[np.ndarray] = []
@@ -199,11 +203,13 @@ async def search(req: SearchRequest) -> dict[str, Any]:
     results = []
     for r in raw_results:
         meta = r.metadata or {}
+        product_id = str(meta.get("product_id", r.item_id))
         results.append({
-            "product_id": str(meta.get("product_id", r.item_id)),
+            "product_id": product_id,
             "name": meta.get("name", ""),
             "score": round(r.score, 4),
             "price": float(meta.get("price", 0.0)),
+            "image_url": image_url_for_article(product_id),
         })
 
     latency_ms = (time.perf_counter() - start) * 1000

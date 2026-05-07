@@ -7,6 +7,7 @@ export type RecommendationItem = {
   rank: number;
   score: number;
   accent: string;
+  imageUrl?: string;
 };
 
 export type RecommendationStage = {
@@ -31,6 +32,7 @@ export type SearchItem = {
   responseTime: string;
   summary: string;
   accent: string;
+  imageUrl?: string;
 };
 
 const recommendationFallbackPalette = [
@@ -61,6 +63,11 @@ type ApiRecommendationItem = {
   rank?: number;
   score?: number;
   accent?: string;
+  image_url?: string;
+  imageUrl?: string;
+  img_url?: string;
+  thumbnail_url?: string;
+  thumbnailUrl?: string;
 };
 
 type ApiRecommendationResponse = {
@@ -72,6 +79,12 @@ type ApiRecommendationResponse = {
   candidate_ms?: number;
   ranking_ms?: number;
   reranking_ms?: number;
+  pipeline_latency?: {
+    candidate_ms?: number;
+    ranking_ms?: number;
+    reranking_ms?: number;
+    total_ms?: number;
+  };
   persona?: string;
 };
 
@@ -88,6 +101,11 @@ type ApiSearchItem = {
   score?: number;
   similarity?: number;
   accent?: string;
+  image_url?: string;
+  imageUrl?: string;
+  img_url?: string;
+  thumbnail_url?: string;
+  thumbnailUrl?: string;
 };
 
 type ApiSearchResponse =
@@ -115,7 +133,7 @@ function buildApiUrl(path: string): string {
 
 function toCurrencyLabel(value: string | number | undefined): string {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return `₩${value.toLocaleString("ko-KR")}`;
+    return `${value.toLocaleString("ko-KR")}원`;
   }
 
   if (typeof value === "string" && value.trim()) {
@@ -154,12 +172,26 @@ function toNumericId(...values: Array<number | string | undefined>): number {
   return Date.now() + Math.floor(Math.random() * 1000);
 }
 
+function toImageUrl(item: {
+  image_url?: string;
+  imageUrl?: string;
+  img_url?: string;
+  thumbnail_url?: string;
+  thumbnailUrl?: string;
+}): string | undefined {
+  return item.image_url ?? item.imageUrl ?? item.img_url ?? item.thumbnail_url ?? item.thumbnailUrl;
+}
+
 function normalizeRecommendationBundle(
   payload: ApiRecommendationResponse,
   topN: number,
 ): RecommendationBundle {
   const rawItems = payload.items ?? payload.recommendations ?? [];
-  const totalLatencyMs = payload.total_ms ?? payload.latency_ms;
+  const pipelineLatency = payload.pipeline_latency;
+  const totalLatencyMs = payload.total_ms ?? payload.latency_ms ?? pipelineLatency?.total_ms;
+  const candidateMs = payload.candidate_ms ?? pipelineLatency?.candidate_ms;
+  const rankingMs = payload.ranking_ms ?? pipelineLatency?.ranking_ms;
+  const rerankingMs = payload.reranking_ms ?? pipelineLatency?.reranking_ms;
   const items = rawItems.slice(0, topN).map((item, index) => ({
     id: toNumericId(item.id, item.item_id, item.product_id),
     title: item.title ?? item.name ?? `Recommendation ${index + 1}`,
@@ -169,6 +201,7 @@ function normalizeRecommendationBundle(
     rank: item.rank ?? index + 1,
     score: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
     accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
+    imageUrl: toImageUrl(item),
   }));
 
   return {
@@ -176,15 +209,9 @@ function normalizeRecommendationBundle(
     totalLatency: toLatencyLabel(totalLatencyMs ?? payload.totalLatency, "0ms"),
     persona: payload.persona ?? "개인화 추천",
     stages: [
-      payload.candidate_ms !== undefined
-        ? { label: "Candidate", value: toLatencyLabel(payload.candidate_ms, "0ms") }
-        : null,
-      payload.ranking_ms !== undefined
-        ? { label: "Ranking", value: toLatencyLabel(payload.ranking_ms, "0ms") }
-        : null,
-      payload.reranking_ms !== undefined
-        ? { label: "Reranking", value: toLatencyLabel(payload.reranking_ms, "0ms") }
-        : null,
+      candidateMs !== undefined ? { label: "Candidate", value: toLatencyLabel(candidateMs, "0ms") } : null,
+      rankingMs !== undefined ? { label: "Ranking", value: toLatencyLabel(rankingMs, "0ms") } : null,
+      rerankingMs !== undefined ? { label: "Reranking", value: toLatencyLabel(rerankingMs, "0ms") } : null,
     ].filter((stage): stage is RecommendationStage => stage !== null),
   };
 }
@@ -197,7 +224,8 @@ function normalizeSearchItems(
   const responseTime = Array.isArray(payload)
     ? "0ms"
     : toLatencyLabel(payload.latency_ms ?? payload.total_ms, "0ms");
-  const searchType = fallbackMode === "multimodal" ? "텍스트 + 이미지" : fallbackMode === "image" ? "이미지" : "텍스트";
+  const searchType =
+    fallbackMode === "multimodal" ? "텍스트 + 이미지" : fallbackMode === "image" ? "이미지" : "텍스트";
 
   return {
     responseTime,
@@ -216,6 +244,7 @@ function normalizeSearchItems(
       responseTime,
       summary: item.summary ?? item.description ?? "검색 결과 설명이 제공되지 않았습니다.",
       accent: item.accent ?? searchFallbackPalette[index % searchFallbackPalette.length],
+      imageUrl: toImageUrl(item),
     })),
   };
 }
