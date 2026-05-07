@@ -27,6 +27,7 @@ from rec_models.candidate.evaluator import (
 from rec_models.candidate.train import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_DATA_PATH,
     DEFAULT_EPOCHS,
     DEFAULT_HARD_NEGATIVE_RATIO,
     DEFAULT_LEARNING_RATE,
@@ -98,7 +99,7 @@ def _parse_float_list(raw: str) -> list[float]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run and compare multiple Two-Tower candidate experiments.")
-    parser.add_argument("--data", type=Path, required=True, help="Processed interaction/evaluation CSV path.")
+    parser.add_argument("--data", type=Path, default=DEFAULT_DATA_PATH, help="Processed interaction/evaluation CSV path.")
     parser.add_argument("--epochs", type=_parse_int_list, default=[DEFAULT_EPOCHS], help="Comma-separated epoch values.")
     parser.add_argument(
         "--batch-sizes",
@@ -312,6 +313,7 @@ def run_experiments(args: argparse.Namespace) -> dict[str, Any]:
             learning_rate=spec.learning_rate,
             weight_decay=spec.weight_decay,
             validation_ratio=args.validation_ratio,
+            split_mode="leave_last_out",
             validation_k=args.validation_k,
             negatives_per_positive=spec.negatives_per_positive,
             hard_negative_ratio=spec.hard_negative_ratio,

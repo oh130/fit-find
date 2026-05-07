@@ -18,6 +18,7 @@ try:
         load_evaluation_data,
     )
     from rec_models.candidate.infer import DEFAULT_CHECKPOINT_DIR, retrieve_candidates_for_users
+    from rec_models.common.utils import build_experiment_report, write_json_report
     from rec_models.serving.candidate_service import generate_candidates
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
     from common.metrics import mean_metric, recall_at_k  # type: ignore[no-redef]
@@ -28,15 +29,17 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
         load_evaluation_data,
     )
     from candidate.infer import DEFAULT_CHECKPOINT_DIR, retrieve_candidates_for_users  # type: ignore[no-redef]
+    from common.utils import build_experiment_report, write_json_report  # type: ignore[no-redef]
     from serving.candidate_service import generate_candidates  # type: ignore[no-redef]
 
 
 DEFAULT_TOP_K = 300
+DEFAULT_EVALUATION_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "processed" / "train_data_dev.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate candidate retrieval quality offline.")
-    parser.add_argument("--data", type=Path, required=True, help="Path to processed recommendation data.")
+    parser.add_argument("--data", type=Path, default=DEFAULT_EVALUATION_DATA_PATH, help="Path to processed recommendation data.")
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="Retrieval cutoff K.")
     parser.add_argument("--candidate-pool-size", type=int, help="Optional explicit candidate pool size.")
     parser.add_argument("--max-users", type=int, help="Optional cap for smoke checks or faster iteration.")
@@ -52,6 +55,9 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CHECKPOINT_DIR,
         help="Checkpoint directory containing two_tower.pt when mode uses Two-Tower.",
     )
+    parser.add_argument("--experiment-name", type=str, default="candidate_eval", help="Stable experiment name for saved reports.")
+    parser.add_argument("--seed", type=int, default=42, help="Recorded random seed for reproducibility metadata.")
+    parser.add_argument("--split-name", type=str, default="unspecified", help="Recorded split name for experiment metadata.")
     parser.add_argument("--output-json", type=Path, help="Optional output path for JSON metrics.")
     return parser.parse_args()
 
@@ -187,9 +193,22 @@ def main() -> None:
         print(f"{f'Recall@{args.top_k}':<18} {metrics['lift'][f'Recall@{args.top_k}']:.6f}")
 
     if args.output_json is not None:
-        output_path = args.output_json.expanduser().resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        report = build_experiment_report(
+            experiment_name=args.experiment_name,
+            stage="candidate",
+            data_path=args.data,
+            metrics=metrics,
+            config={
+                "mode": args.mode,
+                "top_k": args.top_k,
+                "candidate_pool_size": args.candidate_pool_size,
+                "max_users": args.max_users,
+                "checkpoint_dir": str(args.checkpoint_dir.expanduser().resolve()),
+                "seed": args.seed,
+                "split_name": args.split_name,
+            },
+        )
+        output_path = write_json_report(args.output_json, report)
         print(f"\nSaved JSON metrics to {output_path}")
 
 

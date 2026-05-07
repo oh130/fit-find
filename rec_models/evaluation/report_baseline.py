@@ -33,11 +33,12 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 DEFAULT_TOP_K = 50
 DEFAULT_CANDIDATE_K = 300
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "reports" / "baseline"
+DEFAULT_EVALUATION_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "processed" / "train_data_dev.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a baseline evaluation report under rec_models/reports.")
-    parser.add_argument("--data", type=Path, required=True, help="Path to processed recommendation evaluation data.")
+    parser.add_argument("--data", type=Path, default=DEFAULT_EVALUATION_DATA_PATH, help="Path to processed recommendation evaluation data.")
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="Top-K cutoff for recommendation metrics.")
     parser.add_argument("--candidate_k", type=int, default=DEFAULT_CANDIDATE_K, help="Top-K cutoff for candidate recall.")
     parser.add_argument("--max-users", type=int, help="Optional deterministic user cap for faster baseline runs.")

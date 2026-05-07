@@ -229,6 +229,34 @@ rec_models/reports/candidate_experiments/**/summary.csv
 rec_models/reports/candidate_experiments/**/baseline_metrics.json
 rec_models/reports/candidate_experiments/**/manifest.json
 
+# Recommendation generated artifacts
+rec_models/artifacts/
+
+# Generated experiment checkpoint directories. Add final selected checkpoints
+# explicitly with `git add -f` when they are required for reproducibility.
+rec_models/checkpoints/*/
+!rec_models/checkpoints/README.md
+
+# Intermediate / smoke recommendation reports
+rec_models/reports/**/dev_*smoke*.json
+rec_models/reports/baseline/dev_serving_latency_top50_50users.json
+rec_models/reports/baseline/dev_serving_latency_top50_50users_optimized.json
+rec_models/reports/baseline/dev_serving_latency_top50_50users_pool2.json
+rec_models/reports/baseline/dev_serving_latency_top50_50users_pool4.json
+
+# Non-final recommendation experiment reports
+rec_models/reports/baseline/2026-05-03_*.json
+rec_models/reports/baseline/dev_e2e_twotower_serving.json
+rec_models/reports/baseline/e2e_history_aware_serving_top50_*.json
+rec_models/reports/candidate_experiments/2026-05-03_*.json
+rec_models/reports/candidate_experiments/dev_candidate_baseline.json
+rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast.json
+rec_models/reports/candidate_experiments/eval_*.json
+rec_models/reports/diagnostics/
+rec_models/reports/reranking_experiments/
+rec_models/reports/ranking_experiments/2026-05-03_*.json
+rec_models/reports/ranking_experiments/2026-05-04_*.json
+
 # Accidental root npm lockfile
 /package-lock.json
 

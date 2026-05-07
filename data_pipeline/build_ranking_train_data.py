@@ -1,4 +1,5 @@
 import csv
+from datetime import date
 import hashlib
 import logging
 import os
@@ -15,6 +16,7 @@ CUSTOMER_FEATURES_FILE = BASE_DIR / "data" / "processed" / "customer_features.cs
 ARTICLE_FEATURES_FILE = BASE_DIR / "data" / "processed" / "articles_feature.csv"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -25,6 +27,14 @@ MODE_CONFIG = {
         "RANDOM_SEED": 42,
         "LOG_EVERY_N_ROWS": 2_000,
         "PARTITION_COUNT": 16,
+    },
+    "dev": {
+        "MAX_TRANSACTION_ROWS": 1_000_000,
+        "NEGATIVE_RATIO": 1,
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "train_data_dev.csv",
+        "RANDOM_SEED": 42,
+        "LOG_EVERY_N_ROWS": 100_000,
+        "PARTITION_COUNT": 64,
     },
     "production": {
         "MAX_TRANSACTION_ROWS": None,
@@ -74,6 +84,16 @@ OUTPUT_COLUMNS = [
     "age_color",
     "member_category",
     "fashion_category",
+    "days_since_last_purchase",
+    "last_purchase_category_match",
+    "last_purchase_main_category_match",
+    "last_purchase_color_match",
+    "recent_3_purchase_category_count",
+    "recent_3_purchase_main_category_count",
+    "recent_3_purchase_color_count",
+    "recent_3_unique_category_count",
+    "days_since_last_same_category_purchase",
+    "recent_5_purchase_main_category_count",
 ]
 
 CUSTOMER_FEATURE_COLUMNS = [
@@ -98,6 +118,7 @@ ARTICLE_FEATURE_COLUMNS = [
 ]
 
 PARTITION_COLUMNS = [
+    "t_dat",
     "customer_id",
     "article_id",
     "price",
@@ -234,6 +255,7 @@ def partition_transactions(
                 _, writer = writers[partition_index]
                 writer.writerow(
                     {
+                        "t_dat": row["t_dat"].strip(),
                         "customer_id": customer_id,
                         "article_id": article_id,
                         "price": row["price"].strip(),
@@ -258,6 +280,74 @@ def partition_transactions(
     return stats
 
 
+def parse_transaction_date(raw_value: str) -> date:
+    return date.fromisoformat(raw_value.strip())
+
+
+def build_purchase_history_features(
+    *,
+    article_id: str,
+    transaction_date: date,
+    history_article_ids: Sequence[str],
+    history_dates: Sequence[date],
+    article_features: Dict[str, ArticleFeature],
+) -> Dict[str, str]:
+    if not history_article_ids or not history_dates:
+        return {
+            "days_since_last_purchase": "",
+            "last_purchase_category_match": "0",
+            "last_purchase_main_category_match": "0",
+            "last_purchase_color_match": "0",
+            "recent_3_purchase_category_count": "0",
+            "recent_3_purchase_main_category_count": "0",
+            "recent_3_purchase_color_count": "0",
+            "recent_3_unique_category_count": "0",
+            "days_since_last_same_category_purchase": "",
+            "recent_5_purchase_main_category_count": "0",
+        }
+
+    current_article = article_features[article_id]
+    last_article_id = history_article_ids[-1]
+    last_article = article_features.get(last_article_id)
+    days_since_last_purchase = (transaction_date - history_dates[-1]).days
+
+    recent_article_ids = history_article_ids[-3:]
+    recent_articles = [article_features[item_id] for item_id in recent_article_ids if item_id in article_features]
+    recent_5_article_ids = history_article_ids[-5:]
+    recent_5_articles = [article_features[item_id] for item_id in recent_5_article_ids if item_id in article_features]
+
+    current_category = current_article["category"]
+    current_main_category = current_article["main_category"]
+    current_color = current_article["color"]
+    recent_category_count = sum(1 for record in recent_articles if record["category"] == current_category)
+    recent_main_category_count = sum(1 for record in recent_articles if record["main_category"] == current_main_category)
+    recent_color_count = sum(1 for record in recent_articles if record["color"] == current_color)
+    recent_unique_category_count = len({record["category"] for record in recent_articles})
+    recent_5_main_category_count = sum(1 for record in recent_5_articles if record["main_category"] == current_main_category)
+
+    days_since_last_same_category_purchase = ""
+    for previous_date, previous_article_id in zip(reversed(history_dates), reversed(history_article_ids), strict=False):
+        previous_article = article_features.get(previous_article_id)
+        if previous_article is None:
+            continue
+        if previous_article["category"] == current_category:
+            days_since_last_same_category_purchase = str((transaction_date - previous_date).days)
+            break
+
+    return {
+        "days_since_last_purchase": str(days_since_last_purchase),
+        "last_purchase_category_match": "1" if last_article is not None and last_article["category"] == current_category else "0",
+        "last_purchase_main_category_match": "1" if last_article is not None and last_article["main_category"] == current_main_category else "0",
+        "last_purchase_color_match": "1" if last_article is not None and last_article["color"] == current_color else "0",
+        "recent_3_purchase_category_count": str(recent_category_count),
+        "recent_3_purchase_main_category_count": str(recent_main_category_count),
+        "recent_3_purchase_color_count": str(recent_color_count),
+        "recent_3_unique_category_count": str(recent_unique_category_count),
+        "days_since_last_same_category_purchase": days_since_last_same_category_purchase,
+        "recent_5_purchase_main_category_count": str(recent_5_main_category_count),
+    }
+
+
 def make_output_row(
     customer_id: str,
     article_id: str,
@@ -266,6 +356,7 @@ def make_output_row(
     sales_channel_id: str,
     customer_feature: CustomerFeature,
     article_feature: ArticleFeature,
+    history_features: Dict[str, str],
 ) -> Dict[str, str]:
     age_bucket = customer_feature["age_bucket"]
     club_member_status = customer_feature["club_member_status"]
@@ -298,12 +389,13 @@ def make_output_row(
         "age_color": f"{age_bucket}_{color}",
         "member_category": f"{club_member_status}_{category}",
         "fashion_category": f"{fashion_news_frequency}_{category}",
+        **history_features,
     }
 
 
 def collect_partition_user_data(
     partition_path: Path,
-) -> Tuple[Dict[str, Set[str]], Dict[str, List[Tuple[str, str, str]]], int]:
+) -> Tuple[Dict[str, Set[str]], Dict[str, List[Tuple[date, str, str, str]]], int]:
     seen_pairs: Set[Tuple[str, str]] = set()
     user_purchased_articles: Dict[str, Set[str]] = {}
     positive_rows_by_user: Dict[str, List[Tuple[str, str, str]]] = {}
@@ -322,7 +414,7 @@ def collect_partition_user_data(
 
             user_purchased_articles.setdefault(customer_id, set()).add(article_id)
             positive_rows_by_user.setdefault(customer_id, []).append(
-                (article_id, row["price"], row["sales_channel_id"])
+                (parse_transaction_date(row["t_dat"]), article_id, row["price"], row["sales_channel_id"])
             )
 
     return user_purchased_articles, positive_rows_by_user, duplicate_rows
@@ -432,13 +524,24 @@ def write_partition_rows(
         if customer_feature is None:
             continue
 
+        positive_rows.sort(key=lambda row: (row[0], row[1]))
         purchased_articles = user_purchased_articles[customer_id]
         stats["unique_pairs_kept"] += len(positive_rows)
+        positive_contexts: List[Tuple[date, Dict[str, str]]] = []
+        history_article_ids: List[str] = []
+        history_dates: List[date] = []
 
-        for article_id, price, sales_channel_id in positive_rows:
+        for transaction_date, article_id, price, sales_channel_id in positive_rows:
             article_feature = article_features.get(article_id)
             if article_feature is None:
                 continue
+            history_features = build_purchase_history_features(
+                article_id=article_id,
+                transaction_date=transaction_date,
+                history_article_ids=history_article_ids,
+                history_dates=history_dates,
+                article_features=article_features,
+            )
             writer.writerow(
                 make_output_row(
                     customer_id=customer_id,
@@ -448,9 +551,13 @@ def write_partition_rows(
                     sales_channel_id=sales_channel_id,
                     customer_feature=customer_feature,
                     article_feature=article_feature,
+                    history_features=history_features,
                 )
             )
             stats["positives_written"] += 1
+            positive_contexts.append((transaction_date, history_features))
+            history_article_ids.append(article_id)
+            history_dates.append(transaction_date)
 
         negative_target = len(positive_rows) * NEGATIVE_RATIO
         negative_article_ids = sample_negative_articles(
@@ -464,10 +571,12 @@ def write_partition_rows(
             stats["users_without_negative_candidates"] += 1
             continue
 
-        for article_id in negative_article_ids:
+        for negative_index, article_id in enumerate(negative_article_ids):
             article_feature = article_features.get(article_id)
             if article_feature is None:
                 continue
+            context_index = min(negative_index // max(NEGATIVE_RATIO, 1), max(len(positive_contexts) - 1, 0))
+            _, history_features = positive_contexts[context_index]
             writer.writerow(
                 make_output_row(
                     customer_id=customer_id,
@@ -477,6 +586,7 @@ def write_partition_rows(
                     sales_channel_id="-1",
                     customer_feature=customer_feature,
                     article_feature=article_feature,
+                    history_features=history_features,
                 )
             )
             stats["negatives_written"] += 1

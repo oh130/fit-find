@@ -20,10 +20,14 @@ REQUIRED_RAW_FILES = [
 ]
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
     "test": {
+        "OUTPUT_DIR": BASE_DIR / "data" / "processed",
+    },
+    "dev": {
         "OUTPUT_DIR": BASE_DIR / "data" / "processed",
     },
     "production": {
@@ -31,10 +35,12 @@ MODE_CONFIG = {
     },
 }
 
-if MODE not in MODE_CONFIG:
-    raise ValueError(f"Unsupported MODE: {MODE}")
+RUNTIME_MODE = os.getenv("DATA_PIPELINE_MODE", MODE).strip().lower()
 
-CONFIG = MODE_CONFIG[MODE]
+if RUNTIME_MODE not in MODE_CONFIG:
+    raise ValueError(f"Unsupported MODE: {RUNTIME_MODE}")
+
+CONFIG = MODE_CONFIG[RUNTIME_MODE]
 OUTPUT_DIR: Path = CONFIG["OUTPUT_DIR"]
 
 PIPELINE_STEPS = [
@@ -83,7 +89,7 @@ def validate_raw_files() -> None:
 
 def build_step_environment() -> Dict[str, str]:
     env = dict(os.environ)
-    env["DATA_PIPELINE_MODE"] = MODE
+    env["DATA_PIPELINE_MODE"] = RUNTIME_MODE
     return env
 
 
@@ -106,7 +112,7 @@ def main() -> None:
 
     logging.info(
         "mode=%s raw_dir=%s output_dir=%s",
-        MODE,
+        RUNTIME_MODE,
         RAW_DIR,
         OUTPUT_DIR,
     )
@@ -118,7 +124,7 @@ def main() -> None:
     log_stage(
         "data_pipeline_complete",
         run_start,
-        mode=MODE,
+        mode=RUNTIME_MODE,
         steps=len(PIPELINE_STEPS),
     )
 

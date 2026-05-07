@@ -41,14 +41,17 @@ except ImportError:  # pragma: no cover - torch is optional during code-only dev
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_PATH = BASE_DIR / "data" / "processed" / "candidate_train_data_test.csv.gz"
-DEFAULT_ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "item_features.csv"
-DEFAULT_ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "item_features_test.csv"
+DEFAULT_DATA_PATH = BASE_DIR / "data" / "processed" / "candidate_train_data_dev.csv.gz"
+DEFAULT_ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features.csv.gz"
+DEFAULT_ITEM_FEATURES_DEV_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features_dev.csv.gz"
+DEFAULT_ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features_test.csv.gz"
 TARGET_COLUMN = "label"
 USER_ID_COLUMN = "customer_id"
 ITEM_ID_COLUMN = "article_id"
+HISTORY_ITEM_IDS_COLUMN = "history_article_ids"
 PADDING_TOKEN = "__PAD__"
 UNKNOWN_TOKEN = "__UNK__"
+DEFAULT_MAX_HISTORY_ITEMS = 10
 
 DEFAULT_USER_CATEGORICAL_COLUMNS = (
     "age_bucket",
@@ -111,6 +114,8 @@ DEFAULT_ITEM_NUMERIC_COLUMNS: tuple[str, ...] = (
     "item_online_ratio",
     "item_offline_ratio",
 )
+
+
 @dataclass(slots=True, frozen=True)
 class FeatureSchema:
     """Column contract shared by dataset, model, and inference code."""
@@ -122,6 +127,8 @@ class FeatureSchema:
     user_numeric_columns: tuple[str, ...] = DEFAULT_USER_NUMERIC_COLUMNS
     item_categorical_columns: tuple[str, ...] = DEFAULT_ITEM_CATEGORICAL_COLUMNS
     item_numeric_columns: tuple[str, ...] = DEFAULT_ITEM_NUMERIC_COLUMNS
+    history_item_ids_column: str = HISTORY_ITEM_IDS_COLUMN
+    max_history_items: int = DEFAULT_MAX_HISTORY_ITEMS
 
 
 @dataclass(slots=True)
@@ -164,6 +171,8 @@ class TwoTowerFeatureEncoder:
     schema: FeatureSchema = field(default_factory=FeatureSchema)
     user_vocabularies: dict[str, Vocabulary] = field(default_factory=dict)
     item_vocabularies: dict[str, Vocabulary] = field(default_factory=dict)
+    item_id_vocabulary: Vocabulary | None = None
+    history_item_vocabulary: Vocabulary | None = None
 
     def fit(self, data: pd.DataFrame) -> TwoTowerFeatureEncoder:
         """Fit per-column vocabularies on the provided interaction data."""
@@ -178,10 +187,19 @@ class TwoTowerFeatureEncoder:
             column: Vocabulary.build(item_table[column].tolist())
             for column in self.schema.item_categorical_columns
         }
+        item_id_values = item_table[self.schema.item_id_column].astype(str).tolist()
+        self.item_id_vocabulary = Vocabulary.build(item_id_values)
+        history_values: list[str] = item_table[self.schema.item_id_column].astype(str).tolist()
+        if self.schema.history_item_ids_column in data.columns:
+            for raw_value in data[self.schema.history_item_ids_column].dropna().astype(str):
+                history_values.extend(parse_history_item_ids(raw_value, max_items=self.schema.max_history_items))
+        self.history_item_vocabulary = Vocabulary.build(history_values)
         LOGGER.info(
-            "Fitted Two-Tower feature encoder | user_vocab_columns=%s item_vocab_columns=%s users=%s items=%s",
+            "Fitted Two-Tower feature encoder | user_vocab_columns=%s item_vocab_columns=%s item_ids=%s history_items=%s users=%s items=%s",
             len(self.user_vocabularies),
             len(self.item_vocabularies),
+            len(self.item_id_vocabulary.index_to_token) if self.item_id_vocabulary is not None else 0,
+            len(self.history_item_vocabulary.index_to_token) if self.history_item_vocabulary is not None else 0,
             len(user_table),
             len(item_table),
         )
@@ -204,6 +222,8 @@ class TwoTowerFeatureEncoder:
 
     def encode_item_row(self, row: pd.Series | dict[str, Any]) -> dict[str, np.ndarray]:
         row_mapping = row if isinstance(row, dict) else row.to_dict()
+        if self.item_id_vocabulary is None:
+            raise ValueError("TwoTowerFeatureEncoder must be fitted before encoding item ids.")
         categorical = np.asarray(
             [self.item_vocabularies[column].encode(row_mapping.get(column)) for column in self.schema.item_categorical_columns],
             dtype=np.int64,
@@ -215,6 +235,23 @@ class TwoTowerFeatureEncoder:
         return {
             "categorical": categorical,
             "numeric": numeric,
+            "item_id_index": np.asarray(self.item_id_vocabulary.encode(row_mapping.get(self.schema.item_id_column)), dtype=np.int64),
+        }
+
+    def encode_history_item_ids(self, raw_value: Any) -> dict[str, np.ndarray]:
+        if self.history_item_vocabulary is None:
+            raise ValueError("TwoTowerFeatureEncoder must be fitted before encoding history item ids.")
+
+        item_ids = parse_history_item_ids(raw_value, max_items=self.schema.max_history_items)
+        padded = [PADDING_TOKEN] * self.schema.max_history_items
+        mask = np.zeros((self.schema.max_history_items,), dtype=np.float32)
+        start_index = max(0, self.schema.max_history_items - len(item_ids))
+        for offset, item_id in enumerate(item_ids[-self.schema.max_history_items :]):
+            padded[start_index + offset] = item_id
+            mask[start_index + offset] = 1.0
+        return {
+            "ids": np.asarray([self.history_item_vocabulary.encode(item_id) for item_id in padded], dtype=np.int64),
+            "mask": mask,
         }
 
     def metadata(self) -> dict[str, Any]:
@@ -222,6 +259,8 @@ class TwoTowerFeatureEncoder:
             "schema": asdict(self.schema),
             "user_vocabularies": {column: vocab.to_dict() for column, vocab in self.user_vocabularies.items()},
             "item_vocabularies": {column: vocab.to_dict() for column, vocab in self.item_vocabularies.items()},
+            "item_id_vocabulary": self.item_id_vocabulary.to_dict() if self.item_id_vocabulary is not None else None,
+            "history_item_vocabulary": self.history_item_vocabulary.to_dict() if self.history_item_vocabulary is not None else None,
         }
 
 
@@ -272,8 +311,21 @@ def normalize_item_id(value: Any) -> str:
     return text
 
 
+def parse_history_item_ids(value: Any, max_items: int = DEFAULT_MAX_HISTORY_ITEMS) -> list[str]:
+    """Parse a comma-separated recent item sequence into normalized ids."""
+
+    if value is None or pd.isna(value):
+        return []
+    item_ids = [
+        normalize_item_id(raw_item)
+        for raw_item in str(value).split(",")
+        if str(raw_item).strip()
+    ]
+    return item_ids[-max_items:]
+
+
 def _resolve_item_feature_path() -> Path | None:
-    for path in (DEFAULT_ITEM_FEATURES_PATH, DEFAULT_ITEM_FEATURES_TEST_PATH):
+    for path in (DEFAULT_ITEM_FEATURES_DEV_PATH, DEFAULT_ITEM_FEATURES_PATH, DEFAULT_ITEM_FEATURES_TEST_PATH):
         if path.exists():
             return path
     return None
@@ -286,10 +338,9 @@ def enrich_with_item_features(
 ) -> pd.DataFrame:
     """Attach item-level numeric features used by retrieval experiments.
 
-    The processed ranking dataset does not currently contain serving-time item
-    aggregates such as popularity or freshness. This helper merges those
-    features from `item_features(.csv)` when available so retrieval training can
-    use the same item signals already exposed elsewhere in the project.
+    The candidate training pipeline now writes these columns directly into
+    `candidate_train_data`, so this merge is normally skipped. It remains as a
+    fallback for older snapshots that are missing item-level aggregates.
     """
 
     missing_numeric_columns = [column for column in numeric_columns if column not in data.columns]
@@ -374,7 +425,12 @@ def build_entity_tables(data: pd.DataFrame, schema: FeatureSchema | None = None)
     """Create deduplicated user and item feature tables from interaction rows."""
 
     resolved_schema = schema or FeatureSchema()
-    user_columns = [resolved_schema.user_id_column, *resolved_schema.user_categorical_columns, *resolved_schema.user_numeric_columns]
+    user_columns = [
+        resolved_schema.user_id_column,
+        resolved_schema.history_item_ids_column,
+        *resolved_schema.user_categorical_columns,
+        *resolved_schema.user_numeric_columns,
+    ]
     item_columns = [resolved_schema.item_id_column, *resolved_schema.item_categorical_columns, *resolved_schema.item_numeric_columns]
 
     user_table = (
@@ -452,6 +508,42 @@ def stable_holdout_split(
     return train.reset_index(drop=True), validation.reset_index(drop=True)
 
 
+def leave_last_out_split(
+    positive_interactions: pd.DataFrame,
+    schema: FeatureSchema | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hold out each user's final positive row for next-item validation."""
+
+    resolved_schema = schema or FeatureSchema()
+    if len(positive_interactions) < 2:
+        raise ValueError("leave_last_out_split requires at least two positive interactions.")
+
+    sort_columns = [resolved_schema.user_id_column]
+    if "t_dat" in positive_interactions.columns:
+        sort_columns.append("t_dat")
+    sort_columns.append(resolved_schema.item_id_column)
+    ordered = positive_interactions.sort_values(sort_columns).reset_index(drop=True)
+    row_position = ordered.groupby(resolved_schema.user_id_column, sort=False).cumcount()
+    row_count = ordered.groupby(resolved_schema.user_id_column, sort=False)[resolved_schema.item_id_column].transform("size")
+    validation_mask = row_count.gt(1) & row_position.eq(row_count - 1)
+
+    validation = ordered.loc[validation_mask].copy()
+    train = ordered.loc[~validation_mask].copy()
+    if train.empty or validation.empty:
+        raise ValueError(
+            "Leave-last-out split produced an empty train or validation split. "
+            "Use users with at least two positive interactions."
+        )
+    LOGGER.info(
+        "Created leave-last-out split | train_rows=%s validation_rows=%s train_users=%s validation_users=%s",
+        len(train),
+        len(validation),
+        train[resolved_schema.user_id_column].nunique(),
+        validation[resolved_schema.user_id_column].nunique(),
+    )
+    return train.reset_index(drop=True), validation.reset_index(drop=True)
+
+
 class TwoTowerPairDataset(Dataset):
     """Dataset of positive user-item pairs for retrieval training."""
 
@@ -489,16 +581,20 @@ class TwoTowerPairDataset(Dataset):
         item_id = str(row[self.schema.item_id_column])
         user_record = self.user_records[user_id]
         item_record = self.item_records[item_id]
-        user_features = self.encoder.encode_user_row(user_record)
+        user_features = self.encoder.encode_user_row(row)
         item_features = self.encoder.encode_item_row(item_record)
+        history_features = self.encoder.encode_history_item_ids(row.get(self.schema.history_item_ids_column, ""))
 
         return {
             "customer_id": user_id,
             "article_id": item_id,
             "user_categorical": user_features["categorical"],
             "user_numeric": user_features["numeric"],
+            "history_item_ids": history_features["ids"],
+            "history_mask": history_features["mask"],
             "item_categorical": item_features["categorical"],
             "item_numeric": item_features["numeric"],
+            "item_id_index": item_features["item_id_index"],
         }
 
     def _build_category_to_item_ids(self) -> dict[str, tuple[str, ...]]:
@@ -561,10 +657,12 @@ class TwoTowerPairDataset(Dataset):
             return {
                 "categorical": np.empty((0, len(self.schema.item_categorical_columns)), dtype=np.int64),
                 "numeric": np.empty((0, len(self.schema.item_numeric_columns)), dtype=np.float32),
+                "item_id_index": np.empty((0,), dtype=np.int64),
             }
         return {
             "categorical": np.stack([row["categorical"] for row in encoded_rows]).astype(np.int64),
             "numeric": np.stack([row["numeric"] for row in encoded_rows]).astype(np.float32),
+            "item_id_index": np.asarray([row["item_id_index"] for row in encoded_rows], dtype=np.int64),
         }
 
 
@@ -579,8 +677,11 @@ def collate_two_tower_batch(examples: Sequence[dict[str, Any]], as_torch: bool =
         "article_id": [example["article_id"] for example in examples],
         "user_categorical": np.stack([example["user_categorical"] for example in examples]).astype(np.int64),
         "user_numeric": np.stack([example["user_numeric"] for example in examples]).astype(np.float32),
+        "history_item_ids": np.stack([example["history_item_ids"] for example in examples]).astype(np.int64),
+        "history_mask": np.stack([example["history_mask"] for example in examples]).astype(np.float32),
         "item_categorical": np.stack([example["item_categorical"] for example in examples]).astype(np.int64),
         "item_numeric": np.stack([example["item_numeric"] for example in examples]).astype(np.float32),
+        "item_id_index": np.asarray([example["item_id_index"] for example in examples], dtype=np.int64),
     }
     if as_torch:
         if torch is None:
@@ -589,8 +690,11 @@ def collate_two_tower_batch(examples: Sequence[dict[str, Any]], as_torch: bool =
             **batch,
             "user_categorical": torch.as_tensor(batch["user_categorical"], dtype=torch.long),
             "user_numeric": torch.as_tensor(batch["user_numeric"], dtype=torch.float32),
+            "history_item_ids": torch.as_tensor(batch["history_item_ids"], dtype=torch.long),
+            "history_mask": torch.as_tensor(batch["history_mask"], dtype=torch.float32),
             "item_categorical": torch.as_tensor(batch["item_categorical"], dtype=torch.long),
             "item_numeric": torch.as_tensor(batch["item_numeric"], dtype=torch.float32),
+            "item_id_index": torch.as_tensor(batch["item_id_index"], dtype=torch.long),
         }
     return batch
 
@@ -599,17 +703,23 @@ def build_two_tower_datasets(
     csv_path: Path = DEFAULT_DATA_PATH,
     validation_ratio: float = 0.2,
     schema: FeatureSchema | None = None,
+    split_mode: str = "leave_last_out",
 ) -> DatasetArtifacts:
     """Build train/validation datasets and the fitted encoder in one call."""
 
     resolved_schema = schema or FeatureSchema()
     raw_data = load_candidate_training_data(csv_path)
     positives = filter_positive_interactions(raw_data, schema=resolved_schema)
-    train_data, validation_data = stable_holdout_split(
-        positives,
-        validation_ratio=validation_ratio,
-        schema=resolved_schema,
-    )
+    if split_mode == "leave_last_out":
+        train_data, validation_data = leave_last_out_split(positives, schema=resolved_schema)
+    elif split_mode == "user":
+        train_data, validation_data = stable_holdout_split(
+            positives,
+            validation_ratio=validation_ratio,
+            schema=resolved_schema,
+        )
+    else:
+        raise ValueError(f"Unsupported Two-Tower split_mode: {split_mode}")
 
     encoder = TwoTowerFeatureEncoder(schema=resolved_schema).fit(train_data)
     train_dataset = TwoTowerPairDataset(train_data, encoder=encoder, schema=resolved_schema)
@@ -623,6 +733,7 @@ def build_two_tower_datasets(
         "validation_users": validation_data[resolved_schema.user_id_column].nunique(),
         "train_items": train_data[resolved_schema.item_id_column].nunique(),
         "validation_items": validation_data[resolved_schema.item_id_column].nunique(),
+        "split_mode": split_mode,
         "encoder": encoder.metadata(),
     }
     return DatasetArtifacts(

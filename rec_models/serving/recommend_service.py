@@ -9,11 +9,25 @@ from typing import Any
 import pandas as pd
 
 try:
-    from rec_models.serving.candidate_service import generate_candidates, load_serving_artifacts
+    from rec_models.serving.candidate_service import (
+        generate_candidates,
+        load_candidate_user_profiles,
+        load_serving_artifacts,
+        load_sequential_transition_store,
+        load_two_tower_model_bundle,
+        load_two_tower_serving_artifacts,
+    )
     from rec_models.serving.ranking_service import load_customer_features, load_ranking_pipeline, score_candidates
     from rec_models.serving.rerank_bridge import rerank_recommendations
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
-    from serving.candidate_service import generate_candidates, load_serving_artifacts  # type: ignore[no-redef]
+    from serving.candidate_service import (  # type: ignore[no-redef]
+        generate_candidates,
+        load_candidate_user_profiles,
+        load_serving_artifacts,
+        load_sequential_transition_store,
+        load_two_tower_model_bundle,
+        load_two_tower_serving_artifacts,
+    )
     from serving.ranking_service import load_customer_features, load_ranking_pipeline, score_candidates  # type: ignore[no-redef]
     from serving.rerank_bridge import rerank_recommendations  # type: ignore[no-redef]
 
@@ -45,6 +59,10 @@ def warmup_recommendation_assets() -> None:
 
     warmup_start = time.perf_counter()
     load_serving_artifacts()
+    load_candidate_user_profiles()
+    load_sequential_transition_store()
+    load_two_tower_serving_artifacts()
+    load_two_tower_model_bundle()
     load_ranking_pipeline()
     load_customer_features()
     LOGGER.info("Warmup completed in %sms", _elapsed_ms(warmup_start))
@@ -55,6 +73,10 @@ def rank_candidates_to_recommendations(
     candidate_items: pd.DataFrame,
     top_n: int,
     session_context: dict[str, Any] | None = None,
+    *,
+    enable_diversity: bool = True,
+    enable_exploration: bool = True,
+    enable_freshness: bool = True,
 ) -> list[dict[str, Any]]:
     """Convert candidate rows into final recommendations using serving ranking logic."""
 
@@ -64,6 +86,9 @@ def rank_candidates_to_recommendations(
             scored_candidates=candidate_items,
             top_n=top_n,
             random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
+            enable_diversity=enable_diversity,
+            enable_exploration=enable_exploration,
+            enable_freshness=enable_freshness,
         )
 
     try:
@@ -80,6 +105,9 @@ def rank_candidates_to_recommendations(
         scored_candidates=scored_candidates,
         top_n=top_n,
         random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
+        enable_diversity=enable_diversity,
+        enable_exploration=enable_exploration,
+        enable_freshness=enable_freshness,
     )
 
 

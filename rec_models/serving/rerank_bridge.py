@@ -9,10 +9,14 @@ import pandas as pd
 
 
 MAX_CONSECUTIVE_CATEGORY = 2
-DEFAULT_EXPLORATION_EPSILON = 0.25
-DEFAULT_EXPLORATION_RATIO = 0.2
-DEFAULT_MAX_EXPLORATION_SLOTS = 2
+DEFAULT_EXPLORATION_EPSILON = 1.0
+DEFAULT_EXPLORATION_RATIO = 0.6
+DEFAULT_MAX_EXPLORATION_SLOTS = 30
 DEFAULT_NEW_ITEM_WINDOW_DAYS = 7
+DEFAULT_SOFT_DIVERSITY_PENALTY = 0.003
+DEFAULT_SOFT_POPULARITY_PENALTY = 0.004
+DEFAULT_SOFT_FRESHNESS_BOOST = 0.002
+DEFAULT_SCORE_GAP_GUARD = 0.01
 
 
 def _safe_category(row: dict[str, Any]) -> str:
@@ -64,6 +68,80 @@ def apply_diversity_guard(candidates: pd.DataFrame, top_n: int) -> pd.DataFrame:
     return pd.DataFrame(staged_rows)
 
 
+def _normalize_series(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    minimum = float(numeric.min()) if not numeric.empty else 0.0
+    maximum = float(numeric.max()) if not numeric.empty else 0.0
+    if maximum <= minimum:
+        return pd.Series(0.0, index=numeric.index, dtype="float64")
+    return (numeric - minimum) / (maximum - minimum)
+
+
+def apply_soft_greedy_rerank(
+    candidates: pd.DataFrame,
+    top_n: int,
+    *,
+    enable_diversity: bool,
+    enable_exploration: bool,
+    enable_freshness: bool,
+) -> pd.DataFrame:
+    """Greedily rerank near-tie candidates with small relevance-preserving boosts/penalties."""
+
+    if candidates.empty or top_n <= 0:
+        return candidates.head(0).copy()
+
+    pool_size = min(len(candidates), max(top_n * 3, top_n))
+    pool = candidates.head(pool_size).copy().reset_index(drop=True)
+    pool["base_score"] = pd.to_numeric(pool.get("score"), errors="coerce").fillna(0.0)
+    pool["popularity_norm"] = _normalize_series(pool.get("popularity", pd.Series(0.0, index=pool.index)))
+    pool["is_new_item_flag"] = (
+        pool.get("is_new_item", pd.Series(False, index=pool.index))
+        .fillna(False)
+        .astype(bool)
+    )
+    pool["item_age_days"] = pd.to_numeric(pool.get("item_age_days"), errors="coerce")
+    pool["category_key"] = pool.apply(lambda row: _safe_category(row.to_dict()), axis=1)
+    pool["original_rank"] = range(len(pool))
+
+    pool["category_rank"] = pool.groupby("category_key", sort=False).cumcount()
+    pool["soft_score"] = pool["base_score"]
+
+    if enable_diversity:
+        pool["soft_score"] = pool["soft_score"] - (pool["category_rank"] * DEFAULT_SOFT_DIVERSITY_PENALTY)
+
+    if enable_exploration:
+        pool["soft_score"] = pool["soft_score"] - (pool["popularity_norm"] * DEFAULT_SOFT_POPULARITY_PENALTY)
+
+    if enable_freshness:
+        freshness_mask = pool["is_new_item_flag"] | (
+            pool["item_age_days"].notna() & pool["item_age_days"].le(DEFAULT_NEW_ITEM_WINDOW_DAYS)
+        )
+        pool.loc[freshness_mask, "soft_score"] = pool.loc[freshness_mask, "soft_score"] + DEFAULT_SOFT_FRESHNESS_BOOST
+        reason = pool.get("reason", pd.Series("ranking_score", index=pool.index)).fillna("ranking_score")
+        pool.loc[freshness_mask & reason.eq("ranking_score"), "reason"] = "new_item_boost"
+
+    if "is_exploration" not in pool.columns:
+        pool["is_exploration"] = False
+    exploration_mask = pool["original_rank"].ge(top_n)
+    if enable_exploration:
+        pool.loc[exploration_mask, "is_exploration"] = True
+        reason = pool.get("reason", pd.Series("ranking_score", index=pool.index)).fillna("ranking_score")
+        pool.loc[exploration_mask & reason.eq("ranking_score"), "reason"] = "mab_exploration"
+
+    best_base_score = float(pool["base_score"].max())
+    score_floor = best_base_score - DEFAULT_SCORE_GAP_GUARD
+    viable = pool.loc[pool["base_score"].ge(score_floor)].copy()
+    remainder = pool.loc[~pool.index.isin(viable.index)].copy()
+    ordered = pd.concat(
+        [
+            viable.sort_values(["soft_score", "base_score", "popularity", "article_id"], ascending=[False, False, False, True]),
+            remainder.sort_values(["base_score", "popularity", "article_id"], ascending=[False, False, True]),
+        ],
+        ignore_index=True,
+    )
+    return ordered.head(min(top_n, len(ordered))).copy()
+
+
 def _compute_exploration_slots(top_n: int, requested_slots: int | None = None) -> int:
     if top_n <= 2:
         return 0
@@ -85,6 +163,7 @@ def select_exploration_candidates(
     already_selected: pd.DataFrame,
     exploration_slots: int,
     epsilon: float = DEFAULT_EXPLORATION_EPSILON,
+    enable_freshness: bool = True,
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
     """Select exploration candidates using epsilon-greedy priorities."""
@@ -93,7 +172,6 @@ def select_exploration_candidates(
         return remaining_candidates.head(0).copy()
 
     rng = rng or random.Random()
-    selected_rows: list[dict[str, Any]] = []
     selected_ids = set(already_selected.get("article_id", pd.Series(dtype=str)).astype(str))
     category_counts = already_selected.get("main_category", already_selected.get("category", pd.Series(dtype=str))).astype(str).value_counts()
 
@@ -110,58 +188,65 @@ def select_exploration_candidates(
     candidates["category_key"] = candidates.apply(lambda row: _safe_category(row.to_dict()), axis=1)
     candidates["category_penalty"] = candidates["category_key"].map(category_counts.to_dict()).fillna(0.0)
 
-    for _ in range(min(exploration_slots, len(candidates))):
-        if candidates.empty:
-            break
+    candidates["popularity_norm"] = _normalize_series(candidates.get("popularity", pd.Series(0.0, index=candidates.index)))
+    candidates["score_norm"] = _normalize_series(candidates.get("score", pd.Series(0.0, index=candidates.index)))
+    candidates["coverage_exploration_flag"] = (
+        candidates.get("candidate_reason", pd.Series("", index=candidates.index))
+        .astype(str)
+        .eq("coverage_exploration")
+        .astype(float)
+    )
+    candidates["random_tiebreaker"] = [rng.random() for _ in range(len(candidates))]
 
-        use_exploration = rng.random() < epsilon
-        chosen: pd.DataFrame
+    coverage_mask = candidates["coverage_exploration_flag"].eq(1.0)
+    if enable_freshness:
+        freshness_mask = candidates["is_new_item"] | (
+            candidates["item_age_days"].notna() & candidates["item_age_days"].le(DEFAULT_NEW_ITEM_WINDOW_DAYS)
+        )
+    else:
+        freshness_mask = pd.Series(False, index=candidates.index)
 
-        if use_exploration:
-            new_item_mask = candidates["is_new_item"] | (
-                candidates["item_age_days"].notna() & candidates["item_age_days"].le(DEFAULT_NEW_ITEM_WINDOW_DAYS)
-            )
-            new_item_candidates = candidates.loc[
-                new_item_mask
-            ].sort_values(["score", "popularity"], ascending=[False, False])
-            if not new_item_candidates.empty:
-                chosen = new_item_candidates.head(1).copy()
-                chosen.loc[:, "reason"] = "new_item_boost"
-            else:
-                diverse_candidates = candidates.sort_values(
-                    ["category_penalty", "score", "popularity"],
-                    ascending=[True, False, False],
-                )
-                if not diverse_candidates.empty:
-                    chosen = diverse_candidates.head(1).copy()
-                    chosen.loc[:, "reason"] = "mab_exploration"
-                else:
-                    chosen = candidates.sort_values(["popularity", "score"], ascending=[False, False]).head(1).copy()
-                    chosen.loc[:, "reason"] = "mab_exploration"
-        else:
-            chosen = candidates.sort_values(["score", "popularity"], ascending=[False, False]).head(1).copy()
-            chosen.loc[:, "reason"] = chosen["reason"].fillna("ranking_score")
+    if rng.random() < epsilon:
+        candidates["exploration_score"] = (
+            candidates["score_norm"] * 0.25
+            - candidates["category_penalty"] * 0.20
+            - candidates["popularity_norm"] * 0.25
+            + candidates["coverage_exploration_flag"] * 2.00
+            + freshness_mask.astype(float) * 0.30
+            + candidates["random_tiebreaker"] * 0.20
+        )
+        ordered = candidates.sort_values(["exploration_score", "score", "article_id"], ascending=[False, False, True]).copy()
+        ordered.loc[:, "reason"] = "mab_exploration"
+        ordered.loc[freshness_mask & ~coverage_mask, "reason"] = "new_item_boost"
+    else:
+        ordered = candidates.sort_values(["score", "popularity", "article_id"], ascending=[False, False, True]).copy()
+        ordered.loc[:, "reason"] = ordered["reason"].fillna("ranking_score")
 
-        chosen.loc[:, "is_exploration"] = chosen["reason"].isin({"mab_exploration", "new_item_boost"})
-        selected_rows.extend(chosen.to_dict(orient="records"))
-
-        chosen_id = str(chosen.iloc[0]["article_id"])
-        chosen_category = str(chosen.iloc[0]["category_key"])
-        selected_ids.add(chosen_id)
-        category_counts[chosen_category] = int(category_counts.get(chosen_category, 0)) + 1
-
-        candidates = candidates.loc[~candidates["article_id"].astype(str).eq(chosen_id)].copy()
-        candidates["category_penalty"] = candidates["category_key"].map(category_counts.to_dict()).fillna(0.0)
-
-    return pd.DataFrame(selected_rows)
+    selected = ordered.head(min(exploration_slots, len(ordered))).copy()
+    selected.loc[:, "is_exploration"] = selected["reason"].isin({"mab_exploration", "new_item_boost"})
+    return selected
 
 
 def _exploration_positions(top_n: int, slot_count: int) -> list[int]:
     if slot_count <= 0 or top_n <= 0:
         return []
+    slot_count = min(slot_count, max(top_n - 1, 0))
     if slot_count == 1:
         return [min(max(top_n // 3, 1), top_n - 1)]
-    return sorted({min(max(top_n // 3, 1), top_n - 1), min(max((top_n * 2) // 3, 2), top_n - 1)})
+
+    spacing = top_n / float(slot_count + 1)
+    positions: list[int] = []
+    used_positions: set[int] = set()
+    for slot_index in range(1, slot_count + 1):
+        position = min(max(int(round(spacing * slot_index)), 1), top_n - 1)
+        while position in used_positions and position < top_n - 1:
+            position += 1
+        while position in used_positions and position > 1:
+            position -= 1
+        if position not in used_positions:
+            positions.append(position)
+            used_positions.add(position)
+    return sorted(positions)
 
 
 def inject_exploration_slots(
@@ -208,6 +293,9 @@ def rerank_recommendations(
     exploration_slots: int | None = None,
     epsilon: float = DEFAULT_EXPLORATION_EPSILON,
     random_seed: int | None = None,
+    enable_diversity: bool = True,
+    enable_exploration: bool = True,
+    enable_freshness: bool = True,
 ) -> list[dict[str, Any]]:
     """Apply service-level reranking with diversity, freshness, and exploration."""
 
@@ -216,23 +304,52 @@ def rerank_recommendations(
 
     ordered = _sort_candidates(scored_candidates)
     effective_top_n = min(top_n, len(ordered))
-    effective_exploration_slots = min(_compute_exploration_slots(effective_top_n, exploration_slots), effective_top_n)
+    softly_ranked = apply_soft_greedy_rerank(
+        ordered,
+        top_n=effective_top_n,
+        enable_diversity=enable_diversity,
+        enable_exploration=enable_exploration,
+        enable_freshness=enable_freshness,
+    )
+
+    if softly_ranked.empty:
+        softly_ranked = ordered.head(effective_top_n).copy()
+
+    effective_exploration_slots = 0
+    if enable_exploration:
+        effective_exploration_slots = min(_compute_exploration_slots(effective_top_n, exploration_slots), effective_top_n)
+
     primary_slots = max(effective_top_n - effective_exploration_slots, 0)
 
-    primary_ranked = apply_diversity_guard(ordered, top_n=max(primary_slots, effective_top_n if effective_exploration_slots == 0 else primary_slots))
+    if enable_diversity:
+        primary_ranked = apply_diversity_guard(
+            softly_ranked,
+            top_n=max(primary_slots, effective_top_n if effective_exploration_slots == 0 else primary_slots),
+        )
+    else:
+        primary_ranked = softly_ranked.head(max(primary_slots, effective_top_n if effective_exploration_slots == 0 else primary_slots)).copy()
+
     remaining_ids = set(primary_ranked.get("article_id", pd.Series(dtype=str)).astype(str))
     remaining_candidates = ordered.loc[~ordered["article_id"].astype(str).isin(remaining_ids)].copy()
 
-    rng = random.Random(random_seed)
-    exploration_ranked = select_exploration_candidates(
-        remaining_candidates=remaining_candidates,
-        already_selected=primary_ranked,
-        exploration_slots=effective_exploration_slots,
-        epsilon=epsilon,
-        rng=rng,
-    )
-    combined = inject_exploration_slots(primary_ranked=primary_ranked, exploration_candidates=exploration_ranked, top_n=effective_top_n)
-    final_ranked = apply_diversity_guard(combined, top_n=effective_top_n)
+    if enable_exploration and effective_exploration_slots > 0:
+        rng = random.Random(random_seed)
+        exploration_ranked = select_exploration_candidates(
+            remaining_candidates=remaining_candidates,
+            already_selected=primary_ranked,
+            exploration_slots=effective_exploration_slots,
+            epsilon=epsilon,
+            enable_freshness=enable_freshness,
+            rng=rng,
+        )
+        combined = inject_exploration_slots(primary_ranked=primary_ranked, exploration_candidates=exploration_ranked, top_n=effective_top_n)
+    else:
+        combined = primary_ranked.head(effective_top_n).copy()
+
+    if enable_diversity:
+        final_ranked = apply_diversity_guard(combined, top_n=effective_top_n)
+    else:
+        final_ranked = combined.head(effective_top_n).copy()
 
     recommendations: list[dict[str, Any]] = []
     for row in final_ranked.to_dict(orient="records"):

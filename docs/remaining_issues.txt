@@ -1,5 +1,5 @@
 ===== 남은 문제 목록 =====
-기준일: 2026-04-29  (docker-compose 동작 확인: 2026-04-29)
+기준일: 2026-05-06  (추천 모델 dev 기준 명세 통과 확인)
 
 ────────────────────────────
 [검색 엔진]
@@ -16,44 +16,43 @@
 ────────────────────────────
 [추천 모델]
 ────────────────────────────
-※ 참고: candidate_service, ranking_service, rerank_bridge, recommend_service는
-  모두 실제 동작 코드가 구현되어 있음. MAB, 다양성 제어, 신상품 노출도 포함.
-  다만 딥러닝 모델이 스켈레톤이라 현재는 sklearn 기반 baseline으로 동작 중.
+※ 2026-05-06 기준 추천 모델은 dev 평가에서 명세 지표를 통과함.
+   상세 기록: docs/recommendation_experiments.md
 
-3. Two-Tower 딥러닝 모델 부분 구현
-   - candidate/model.py, train.py, dataset.py, infer.py, evaluator.py 구현 완료
-   - 학습/추론/오프라인 평가는 가능하고 체크포인트(two_tower.pt)도 생성됨
-   - 다만 serving candidate_service에는 아직 미연결이라 현재 서빙은 메타데이터 + 인기도 baseline으로 동작
-   - Recall@300 측정됨: baseline 0.251665, Two-Tower 0.175214 (2026-04-12 실험 기준)
-   - 목표 Recall@300 ≥ 0.30은 아직 미달
+3. 추천 모델 명세 지표 통과 확인 완료
+   - Candidate Generation:
+     Two-Tower Recall@300 = 0.614632  (목표 ≥ 0.30 통과)
+     결과: rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json
+   - Ranking:
+     LogReg CTR ranker AUC = 0.956739  (목표 ≥ 0.70 통과)
+     결과: rec_models/reports/ranking_experiments/dev_ranking_logreg.json
+   - Final Recommendation:
+     HitRate@50 = 0.497000
+     NDCG@50 = 0.178138
+     Coverage@50 = 0.215203
+     목표 HitRate@50 ≥ 0.20, NDCG@50 ≥ 0.08, Coverage@50 ≥ 0.20 통과
+     결과: rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json
+   - Serving Latency:
+     avg = 127.47ms, p50 = 117.22ms, p95 = 187.61ms
+     목표 latency ≤ 200ms 통과
+     결과: rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json
 
-4. DeepFM Ranking 모델 미구현
-   - ranking/model.py 스켈레톤만 있음
-   - 현재는 sklearn LogisticRegression baseline으로 대체 중 (ranking_baseline.joblib)
-   - ranking/train.py, infer.py, evaluator.py는 baseline 기준으로 구현 완료
-   - AUC 측정됨: 0.947862 (2026-04-11 baseline 리포트, max_users=30 기준)
-   - DeepFM/Wide&Deep 계열 실제 딥러닝 랭커는 아직 없음
-
-5. 세션 인코더 미구현
-   - session/session_encoder.py 스켈레톤만 있음
-   - 현재 세션 관심사는 Redis에서 단순 키워드 매칭으로 처리 중
-   - GRU/Transformer 기반 단기 관심 임베딩 없음
-
-6. 추천 성능 지표 재측정 필요
-   - baseline 리포트 생성 완료 (max_users=30 샘플 기준):
-     HitRate@50 = 1.000000
-     NDCG@50 = 0.933807
-     Coverage@50 = 0.014961  ← 목표 0.20 미달
-   - 전체 데이터 기준 재측정 필요
+4. 추천 모델 후속 고도화 항목
+   - GRU/Transformer 기반 session encoder는 아직 최종 채택안에 포함하지 않음
+     현재는 history_article_ids average pooling + recent_click/session_interest 기반 session-aware 경로로 동작
+   - MAB는 epsilon-greedy exploration slot 방식으로 구현됨
+     온라인 reward update 기반 bandit 학습은 후속 고도화 항목
+   - cold-start fallback은 구현됐으나 dev E2E sampled users에서 cold_start_subset=0이라 별도 subset metric은 없음
+   - Docker image 내부 artifact가 최신 checkpoint/logreg_dev 경로와 동기화되어 있는지 배포 전 확인 필요
 
 
 ────────────────────────────
 [문서화]
 ────────────────────────────
-8. docs/ 실험 결과 리포트 없음
+8. docs/ 실험 결과 리포트 상태
    - 검색 성능 측정 후 리포트 작성 필요
-   - 추천 성능 전체 데이터 재측정 후 리포트 작성 필요
-   - 명세서 필수 항목: 데이터 분할 방식, 지표 정의, 재현 시드, 베이스라인 대비 개선율 포함
+   - 추천 모델 리포트는 docs/recommendation_experiments.md에 최신 통과 기준으로 정리 완료
+   - 명세서 필수 항목 중 추천 파트 데이터 분할 방식, 지표 정의, 재현 seed, baseline 대비 개선율 포함 완료
 
 ────────────────────────────
 [추가 기능 구현 계획] — 명세서 외 차별화 기능 (구현 순서대로)
@@ -110,6 +109,11 @@ D. 예산 기반 패션 세트 추천 (4순위)
 ✅ 프론트엔드 React 앱 → pront/ 구현 완료, docker-compose 컨테이너 추가 완료
 ✅ 추천 결과 Redis 캐싱 → api_gateway /api/recommend에 TTL 300s 캐시 구현 완료
      캐시 키: cache:recommend:{user_id}:{top_n}:{click_count} (클릭 발생 시 자동 무효화)
+✅ 추천 모델 dev 기준 명세 지표 통과 (2026-05-06)
+     - Candidate Recall@300 = 0.614632
+     - Ranking AUC = 0.956739
+     - Final HitRate@50 = 0.497000, NDCG@50 = 0.178138, Coverage@50 = 0.215203
+     - Serving latency p95 = 187.61ms
 ✅ simulator/ 구현 완료 — docker-compose 정상 동작 확인 (2026-04-29)
      - 6가지 페르소나(트렌드세터/실용주의자/가성비추구/브랜드충성/충동구매/신중탐색) 정의
      - search → click → cart → purchase 상태 머신 구현

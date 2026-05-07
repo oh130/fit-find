@@ -21,6 +21,7 @@ ARTICLES_FILE = RAW_DIR / "articles.csv"
 TRANSACTIONS_FILE = RAW_DIR / "transactions_train.csv"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -35,6 +36,18 @@ MODE_CONFIG = {
         "TRAIN_DATA_FILE": PROCESSED_DIR / "candidate_train_data_test.csv.gz",
         "MANIFEST_FILE": PROCESSED_DIR / "candidate_manifest_test.json",
         "LOG_EVERY_N_ROWS": 100_000,
+    },
+    "dev": {
+        "MAX_TRANSACTION_ROWS": 1_000_000,
+        "CHUNK_SIZE": 100_000,
+        "SEGMENT_TOP_K": 30,
+        "INTERACTIONS_FILE": PROCESSED_DIR / "candidate_interactions_dev.csv.gz",
+        "USER_FEATURES_FILE": PROCESSED_DIR / "candidate_user_features_dev.csv.gz",
+        "ITEM_FEATURES_FILE": PROCESSED_DIR / "candidate_item_features_dev.csv.gz",
+        "SEGMENT_CANDIDATES_FILE": PROCESSED_DIR / "candidate_segment_candidates_dev.csv.gz",
+        "TRAIN_DATA_FILE": PROCESSED_DIR / "candidate_train_data_dev.csv.gz",
+        "MANIFEST_FILE": PROCESSED_DIR / "candidate_manifest_dev.json",
+        "LOG_EVERY_N_ROWS": 250_000,
     },
     "production": {
         "MAX_TRANSACTION_ROWS": None,
@@ -70,6 +83,7 @@ LOG_EVERY_N_ROWS: int = CONFIG["LOG_EVERY_N_ROWS"]
 UNKNOWN_VALUE = "UNKNOWN"
 AGE_BUCKETS = ["under_20", "20s", "30s", "40s", "50s", "60_plus", "unknown"]
 SEASONS = ["spring", "summer", "autumn", "winter"]
+MAX_HISTORY_ARTICLES = 10
 
 USER_FEATURE_COLUMNS = [
     "customer_id",
@@ -147,6 +161,7 @@ INTERACTION_COLUMNS = [
     "event_strength",
     "label",
     "split",
+    "history_article_ids",
 ]
 
 
@@ -677,8 +692,19 @@ def write_interaction_chunk(
     valid_start: pd.Timestamp,
     test_start: pd.Timestamp,
     is_first_chunk: bool,
+    user_history: Dict[str, list[str]],
 ) -> None:
     interactions = chunk[["customer_id", "article_id", "t_dat", "price", "sales_channel_id"]].copy()
+    interactions = interactions.sort_values(["t_dat", "customer_id", "article_id"]).reset_index(drop=True)
+    history_values: list[str] = []
+    for row in interactions.loc[:, ["customer_id", "article_id"]].itertuples(index=False):
+        customer_id = str(row.customer_id)
+        article_id = str(row.article_id)
+        previous_items = user_history.setdefault(customer_id, [])
+        history_values.append(",".join(previous_items[-MAX_HISTORY_ARTICLES:]))
+        previous_items.append(article_id)
+        if len(previous_items) > MAX_HISTORY_ARTICLES:
+            del previous_items[:-MAX_HISTORY_ARTICLES]
     interactions["year"] = interactions["t_dat"].dt.year.astype("int16")
     interactions["month"] = interactions["t_dat"].dt.month.astype("int8")
     interactions["week"] = interactions["t_dat"].dt.isocalendar().week.astype("int16")
@@ -688,6 +714,7 @@ def write_interaction_chunk(
     interactions["event_strength"] = np.int8(3)
     interactions["label"] = np.int8(1)
     interactions["split"] = interaction_split(interactions["t_dat"], valid_start, test_start)
+    interactions["history_article_ids"] = history_values
     interactions.to_csv(
         output_path,
         index=False,
@@ -847,6 +874,7 @@ def main() -> None:
             output_path.unlink()
 
     first_interaction_chunk = True
+    user_history: Dict[str, list[str]] = {}
     transaction_rows_seen = 0
     skipped_customer_rows = 0
     skipped_article_rows = 0
@@ -873,6 +901,7 @@ def main() -> None:
             valid_start=valid_start,
             test_start=test_start,
             is_first_chunk=first_interaction_chunk,
+            user_history=user_history,
         )
         first_interaction_chunk = False
 

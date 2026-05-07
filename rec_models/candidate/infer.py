@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -50,9 +51,23 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parents[2] / "data" / "checkpoints" / "candidate"
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_CANDIDATE_CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints" / "candidate"
+DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints" / "candidate_dev_history_itemid_fast"
 DEFAULT_MODEL_ARTIFACT = "two_tower.pt"
 DEFAULT_TOP_K = 300
+
+
+def _resolve_default_checkpoint_dir() -> Path:
+    configured_path = os.getenv("TWO_TOWER_CHECKPOINT_DIR")
+    if configured_path:
+        return Path(configured_path)
+    if (DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR / DEFAULT_MODEL_ARTIFACT).exists():
+        return DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR
+    return DEFAULT_CANDIDATE_CHECKPOINT_DIR
+
+
+DEFAULT_CHECKPOINT_DIR = _resolve_default_checkpoint_dir()
 
 
 def _require_torch() -> None:
@@ -97,6 +112,18 @@ def _rebuild_encoder(encoder_metadata: dict[str, Any]) -> TwoTowerFeatureEncoder
         )
         for column, vocab in encoder_metadata.get("item_vocabularies", {}).items()
     }
+    item_id_vocab = encoder_metadata.get("item_id_vocabulary")
+    if item_id_vocab is not None:
+        encoder.item_id_vocabulary = Vocabulary(
+            token_to_index={str(token): int(index) for token, index in item_id_vocab["token_to_index"].items()},
+            index_to_token=[str(token) for token in item_id_vocab["index_to_token"]],
+        )
+    history_vocab = encoder_metadata.get("history_item_vocabulary")
+    if history_vocab is not None:
+        encoder.history_item_vocabulary = Vocabulary(
+            token_to_index={str(token): int(index) for token, index in history_vocab["token_to_index"].items()},
+            index_to_token=[str(token) for token in history_vocab["index_to_token"]],
+        )
     return encoder
 
 
@@ -120,6 +147,11 @@ def load_two_tower_artifacts(
         item_tower=_tower_config_from_dict(model_config_dict.get("item_tower", {})),
         output_dim=int(model_config_dict.get("output_dim", 64)),
         l2_normalize=bool(model_config_dict.get("l2_normalize", True)),
+        logit_scale=float(model_config_dict.get("logit_scale", 20.0)),
+        history_item_vocab_size=int(model_config_dict.get("history_item_vocab_size", 0)),
+        history_embedding_dim=int(model_config_dict.get("history_embedding_dim", 32)),
+        item_id_vocab_size=int(model_config_dict.get("item_id_vocab_size", 0)),
+        item_id_embedding_dim=int(model_config_dict.get("item_id_embedding_dim", 32)),
     )
     model = TwoTowerModel(config)
     model.load_state_dict(payload["model_state_dict"])
@@ -151,7 +183,13 @@ def encode_user_records(
     numeric = _to_tensor(np.stack([row["numeric"] for row in encoded]).astype(np.float32), torch.float32, device)
 
     with torch.no_grad():
-        embeddings = model.encode_user(categorical, numeric)
+        if encoder.history_item_vocabulary is not None and model.config.history_item_vocab_size > 0:
+            encoded_history = [encoder.encode_history_item_ids(record.get("history_article_ids", "")) for record in user_records]
+            history_item_ids = _to_tensor(np.stack([row["ids"] for row in encoded_history]), torch.long, device)
+            history_mask = _to_tensor(np.stack([row["mask"] for row in encoded_history]).astype(np.float32), torch.float32, device)
+            embeddings = model.encode_user(categorical, numeric, history_item_ids=history_item_ids, history_mask=history_mask)
+        else:
+            embeddings = model.encode_user(categorical, numeric)
     return embeddings.detach().cpu().numpy().astype(np.float32)
 
 
@@ -170,9 +208,10 @@ def encode_item_records(
     categorical = _to_tensor(np.stack([row["categorical"] for row in encoded]), torch.long, device)
     numeric_np = np.stack([row["numeric"] for row in encoded]).astype(np.float32) if encoded[0]["numeric"].size else np.zeros((len(encoded), 0), dtype=np.float32)
     numeric = _to_tensor(numeric_np, torch.float32, device)
+    item_id_index = _to_tensor(np.asarray([row["item_id_index"] for row in encoded], dtype=np.int64), torch.long, device)
 
     with torch.no_grad():
-        embeddings = model.encode_item(categorical, numeric)
+        embeddings = model.encode_item(categorical, numeric, item_id_index=item_id_index)
     return embeddings.detach().cpu().numpy().astype(np.float32)
 
 
@@ -191,6 +230,44 @@ def build_item_embedding_index(
     item_ids = [normalize_item_id(record[resolved_schema.item_id_column]) for record in item_records]
     embeddings = encode_item_records(model, encoder, item_records, device=device)
     return embeddings, item_ids, item_records
+
+
+def build_latest_user_table(user_rows: pd.DataFrame, schema: FeatureSchema) -> pd.DataFrame:
+    """Keep the most recent per-user row so history-aware user features survive."""
+
+    sort_columns = [schema.user_id_column]
+    if "t_dat" in user_rows.columns:
+        sort_columns.append("t_dat")
+    if schema.history_item_ids_column in user_rows.columns:
+        working = user_rows.copy()
+        working["_history_len"] = (
+            working[schema.history_item_ids_column]
+            .fillna("")
+            .astype(str)
+            .map(lambda value: 0 if not value else len([item for item in value.split(",") if item.strip()]))
+        )
+        sort_columns.append("_history_len")
+    else:
+        working = user_rows.copy()
+    sort_columns.append(schema.item_id_column)
+    latest = working.sort_values(sort_columns).drop_duplicates(schema.user_id_column, keep="last")
+    latest = latest.drop(columns=["_history_len"], errors="ignore")
+    user_columns = [
+        schema.user_id_column,
+        schema.history_item_ids_column,
+        *schema.user_categorical_columns,
+        *schema.user_numeric_columns,
+    ]
+    user_table = latest.loc[:, [column for column in user_columns if column in latest.columns]].reset_index(drop=True)
+    for column in schema.user_categorical_columns:
+        if column not in user_table.columns:
+            user_table[column] = "__UNK__"
+    for column in schema.user_numeric_columns:
+        if column not in user_table.columns:
+            user_table[column] = 0.0
+    if schema.history_item_ids_column not in user_table.columns:
+        user_table[schema.history_item_ids_column] = ""
+    return user_table
 
 
 def retrieve_top_k(
@@ -259,7 +336,7 @@ def retrieve_candidates_for_users(
         schema=schema,
         device=device,
     )
-    user_table, _ = build_entity_tables(user_rows, schema=schema)
+    user_table = build_latest_user_table(user_rows, schema=schema)
     user_records = user_table.to_dict(orient="records")
     user_embeddings = encode_user_records(model, encoder, user_records, device=device)
 
@@ -300,7 +377,7 @@ def main() -> None:
         if user_rows.empty:
             raise ValueError(f"user_id not found in input data: {args.user_id}")
     else:
-        user_rows = data.drop_duplicates("customer_id", keep="first").head(10).copy()
+        user_rows = build_latest_user_table(data, schema=FeatureSchema()).head(10).copy()
 
     results = retrieve_candidates_for_users(
         user_rows=user_rows,

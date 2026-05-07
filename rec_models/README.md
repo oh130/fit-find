@@ -30,7 +30,7 @@
 현재 추천 서빙 흐름은 다음과 같습니다.
 
 1. Candidate Generation
-   - 상품 메타데이터, popularity, recent clicks, session interest를 활용해 후보군을 생성합니다.
+   - 기본 경로에서는 sequential transition, 상품 메타데이터, popularity, recent clicks, session interest, Two-Tower retrieval을 결합해 후보군을 생성합니다.
    - 사용자/세션 신호가 부족한 경우 popularity 기반 fallback을 사용합니다.
 2. Ranking
    - `joblib`로 저장된 baseline ranking 모델로 후보군을 점수화합니다.
@@ -58,16 +58,33 @@ Request
 
 - `serving/candidate_service.py`에 메타데이터 기반 candidate generation이 구현되어 있습니다.
 - popularity 기반 fallback candidate retrieval을 지원합니다.
+- 기본 serving candidate 전략은 `sequential_combined + Two-Tower hybrid`입니다.
+- sequential transition artifact를 사용합니다.
+  - `article_id -> next_article_id`
+  - `main_category -> next_article_id`
+- co-purchase artifact는 남아 있지만 기본 serving 경로에서는 사용하지 않습니다.
 - 세션 기반 후보 확장을 지원합니다.
   - `recent_clicks`
   - `session_interest`
 - 최근 클릭한 아이템은 최종 candidate pool에서 제외합니다.
 - `candidate_reason`, popularity, freshness 관련 메타데이터를 함께 생성합니다.
 
+기본 설정은 다음과 같습니다.
+
+- `include_sequential=True`
+- `include_two_tower=True`
+- `include_copurchase=False`
+
 현재 candidate 단계에서 동작하는 주요 분기는 다음과 같습니다.
 
 - `cold_start_popularity`
   - recent clicks와 session interest가 모두 없을 때 사용됩니다.
+- `sequential_article_transition`
+  - 최근 구매/클릭 article에서 다음 1~3 step 전이 후보를 확장합니다.
+- `sequential_category_transition`
+  - 최근 구매/클릭 article의 `main_category`에서 다음 1~3 step 전이 후보를 확장합니다.
+- `two_tower_candidate`
+  - Two-Tower retrieval 후보를 hybrid 방식으로 상단 candidate pool에 우선 반영합니다.
 - recent-click signal matching
   - 최근 클릭 상품과의 category / main category / color 유사도를 활용합니다.
 - session-interest matching
@@ -201,9 +218,9 @@ rec_models/
 - `ranking_baseline_metadata.json`
   - ranking pipeline과 함께 사용하는 feature metadata
 - `two_tower.pt`
-  - candidate 모델 checkpoint
+  - Two-Tower candidate 모델 checkpoint
 - `deepfm.pt`
-  - ranking 모델 checkpoint
+  - DeepFM ranking 실험 checkpoint. 최종 serving 채택 모델은 LogReg CTR ranker이다.
 
 ### `data/processed/`
 
@@ -377,26 +394,31 @@ http://localhost:8003/docs
 레포지토리 루트에서 아래 명령으로 오프라인 평가를 실행합니다.
 
 ```bash
-python -m rec_models.evaluation.evaluate_recommender \
-  --data rec_models/data/processed/test_recommendation_data.csv \
-  --top_k 50
+.venv/bin/python -m rec_models.evaluation.evaluate_recommender \
+  --top_k 50 \
+  --candidate-k 300 \
+  --max-users 1000 \
+  --use-serving-candidates \
+  --output-json rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json
 ```
 
 추가 예시는 다음과 같습니다.
 
 ```bash
-python -m rec_models.evaluation.evaluate_recommender \
-  --data rec_models/data/processed/test_recommendation_data.csv \
+.venv/bin/python -m rec_models.evaluation.evaluate_recommender \
   --top_k 50 \
-  --max-users 500 \
-  --output-json rec_models/evaluation/results.json
+  --candidate-k 300 \
+  --max-users 1000 \
+  --use-serving-candidates \
+  --skip-popularity-baseline \
+  --output-json rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json
 ```
 
 ```bash
-python -m rec_models.evaluation.evaluate_recommender \
-  --data rec_models/data/processed/test_recommendation_data.csv \
-  --top_k 50 \
-  --skip-popularity-baseline
+.venv/bin/python -m rec_models.evaluation.measure_serving_latency \
+  --top-k 50 \
+  --max-users 50 \
+  --output-json rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json
 ```
 
 ### 지표 설명
@@ -425,21 +447,43 @@ CLI는 다음 결과를 함께 출력합니다.
 - popularity baseline metrics
 - improvement versus popularity baseline
 
+### 최종 dev 기준 결과
+
+최신 dev mode 기준 추천 모델은 명세 지표를 통과했습니다.
+
+| 항목 | 기준 | 결과 | 판정 |
+|---|---:|---:|---|
+| Candidate Recall@300 | >= 0.30 | 0.614632 | 통과 |
+| Ranking AUC | >= 0.70 | 0.956739 | 통과 |
+| HitRate@50 | >= 0.20 | 0.497000 | 통과 |
+| NDCG@50 | >= 0.08 | 0.178138 | 통과 |
+| Coverage@50 | >= 0.20 | 0.215203 | 통과 |
+| Serving latency p95 | <= 200ms | 187.61ms | 통과 |
+
+주요 결과 파일:
+
+- `rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json`
+- `rec_models/reports/ranking_experiments/dev_ranking_logreg.json`
+- `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json`
+- `rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json`
+
 ## 7. 현재 한계
 
-- candidate 단계 latency가 아직 높아 production 수준 최적화가 필요합니다.
-- popularity 중심 candidate pool 특성상 coverage가 아직 낮습니다.
-- cold-start subset 크기가 충분하지 않아 해석이 불안정할 수 있습니다.
+- dev 기준 명세 지표는 통과했지만, full production data 기준 재검증은 별도 수행이 필요합니다.
+- cold-start fallback은 구현되어 있으나 dev E2E 샘플에서 cold-start subset이 0명이라 별도 subset metric은 없습니다.
 - 데이터셋 구조와 positive label 추론 방식 때문에 평가 편향이 발생할 수 있습니다.
 - `/session/update`는 아직 placeholder이며 session persistence가 구현되어 있지 않습니다.
-- exploration은 아직 heuristic 기반이며 실제 contextual bandit 수준은 아닙니다.
+- exploration은 epsilon-greedy slot 기반이며, 온라인 reward update를 갖춘 contextual bandit은 아닙니다.
+- Session은 recent history/session signal 기반이며, GRU/Transformer session encoder는 후속 고도화 항목입니다.
 
 ## 8. TODO
 
-- candidate stage를 최적화해 latency를 `200ms` 이하로 낮추기
-- reranking 및 candidate diversity 전략 개선으로 coverage 향상
+- full production data 기준 최종 재평가
+- Docker image 내부 artifact가 최신 Two-Tower/logreg checkpoint와 동기화되는지 배포 전 확인
+- cold-start 전용 holdout set 구성 및 별도 metric 산출
+- GRU/Transformer 기반 session encoder 고도화
 - popularity fallback을 넘어서는 cold-start 전략 고도화
-- epsilon-greedy 기반 exploration을 bandit 기반 정책으로 업그레이드
+- epsilon-greedy exploration을 reward update 기반 bandit 정책으로 업그레이드
 - user embedding / item embedding 등 feature 추가
 - train/test split 전략 개선으로 offline evaluation 신뢰도 향상
 - volume mount 또는 external storage 기반 대용량 데이터 처리 개선
@@ -449,6 +493,7 @@ CLI는 다음 결과를 함께 출력합니다.
 
 - FastAPI 기반 추천 API 서버가 구현되어 있습니다.
 - candidate generation, ranking, reranking이 end-to-end로 연결되어 있습니다.
+- dev 기준 Candidate Recall, Ranking AUC, HitRate, NDCG, Coverage, latency 명세를 통과했습니다.
 - 오프라인 evaluation CLI에서 HitRate, NDCG, Coverage 및 popularity baseline 비교를 지원합니다.
 - Docker standalone 실행이 가능하며 포트는 `8003`을 사용합니다.
-- 다음 우선 과제는 latency 최적화, coverage 개선, cold-start 및 exploration 고도화입니다.
+- 다음 우선 과제는 production data 재검증, cold-start subset 평가, session/MAB 고도화입니다.

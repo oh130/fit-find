@@ -11,6 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TRANSACTIONS_FILE = BASE_DIR / "data" / "raw" / "transactions_train.csv"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -18,6 +19,12 @@ MODE_CONFIG = {
         "MAX_TRANSACTION_ROWS": 100_000,
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "item_features_test.csv",
         "LOG_EVERY_N_ROWS": 20_000,
+        "NEW_ITEM_WINDOW_DAYS": 7,
+    },
+    "dev": {
+        "MAX_TRANSACTION_ROWS": 1_000_000,
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "item_features_dev.csv",
+        "LOG_EVERY_N_ROWS": 100_000,
         "NEW_ITEM_WINDOW_DAYS": 7,
     },
     "production": {

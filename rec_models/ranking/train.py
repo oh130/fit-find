@@ -1,10 +1,4 @@
-"""Baseline ranking model training pipeline.
-
-This module trains a maintainable Stage-2 ranking baseline from a tabular CSV.
-It keeps preprocessing and model inference bundled in a single scikit-learn
-pipeline so later serving code can load one artifact and score candidates with a
-stable feature contract.
-"""
+"""Ranking model training entry points for logistic baseline and DeepFM."""
 
 from __future__ import annotations
 
@@ -17,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -27,29 +22,48 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.preprocessing import OneHotEncoder
 
+try:
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader, TensorDataset
+except ImportError:  # pragma: no cover - DeepFM requires torch
+    torch = None
+    nn = None  # type: ignore[assignment]
+    DataLoader = Any  # type: ignore[assignment]
+    TensorDataset = Any  # type: ignore[assignment]
+
+try:
+    from rec_models.ranking.model import DeepFMConfig, DeepFMRanker
+except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from ranking.model import DeepFMConfig, DeepFMRanker  # type: ignore[no-redef]
+
 
 LOGGER = logging.getLogger(__name__)
 
 TARGET_COLUMN = "label"
 IDENTIFIER_COLUMNS = ("customer_id", "article_id")
-LEAKAGE_COLUMNS = {
-    "label",
-    "customer_id",
-    "article_id",
-    "price",
-    "sales_channel_id",
-}
+LEAKAGE_COLUMNS = {"label", "customer_id", "article_id", "price", "sales_channel_id"}
 DEFAULT_VALIDATION_SIZE = 0.2
 DEFAULT_RANDOM_STATE = 42
 DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_TRAINING_DATA_PATH = BASE_DIR / "data" / "processed" / "train_data_dev.csv"
+ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "item_features.csv"
+ITEM_FEATURES_DEV_PATH = BASE_DIR / "data" / "processed" / "item_features_dev.csv"
+ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "item_features_test.csv"
 PIPELINE_ARTIFACT_NAME = "ranking_baseline.joblib"
 METADATA_ARTIFACT_NAME = "ranking_baseline_metadata.json"
+DEEPFM_ARTIFACT_NAME = "ranking_deepfm.pt"
+DEEPFM_METADATA_ARTIFACT_NAME = "ranking_deepfm_metadata.json"
+DEFAULT_DEEPFM_BATCH_SIZE = 256
+DEFAULT_DEEPFM_EPOCHS = 10
+DEFAULT_DEEPFM_LEARNING_RATE = 1e-3
+DEFAULT_DEEPFM_WEIGHT_DECAY = 1e-5
+DEFAULT_LOGREG_MAX_ITER = 3000
 
 
 @dataclass(slots=True)
 class TrainingArtifacts:
-    """Metadata persisted alongside the trained ranking pipeline."""
-
     target_column: str
     identifier_columns: list[str]
     feature_columns: list[str]
@@ -59,215 +73,217 @@ class TrainingArtifacts:
     created_at_utc: str
     validation_size: float
     random_state: int
+    split_mode: str
 
 
 def configure_logging(verbose: bool = False) -> None:
-    """Configure process-wide logging for CLI execution."""
-
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
+    logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
+
+def _require_torch() -> None:
+    if torch is None or nn is None:
+        raise ImportError("torch is required to train the DeepFM ranking model.")
 
 
 def load_training_data(csv_path: Path) -> pd.DataFrame:
-    """Load ranking training data from CSV.
-
-    Args:
-        csv_path: Path to the CSV file used for baseline ranking training.
-
-    Returns:
-        Loaded pandas DataFrame.
-
-    Raises:
-        FileNotFoundError: If the CSV file does not exist.
-        ValueError: If the target column is missing.
-    """
-
     csv_path = csv_path.expanduser().resolve()
     if not csv_path.exists():
         raise FileNotFoundError(f"Training data not found: {csv_path}")
 
     LOGGER.info("Loading training data from %s", csv_path)
     df = pd.read_csv(csv_path)
-
     if TARGET_COLUMN not in df.columns:
-        raise ValueError(
-            f"Training data must include a '{TARGET_COLUMN}' column. "
-            f"Available columns: {sorted(df.columns.tolist())}"
-        )
+        raise ValueError(f"Training data must include a '{TARGET_COLUMN}' column.")
+    if "article_id" in df.columns:
+        df["article_id"] = df["article_id"].astype(str).str.strip().str.zfill(10)
+    return enrich_with_item_features(df)
 
-    LOGGER.info("Loaded %s rows and %s columns", len(df), len(df.columns))
-    return df
+
+def _resolve_item_features_path() -> Path | None:
+    for path in (ITEM_FEATURES_DEV_PATH, ITEM_FEATURES_PATH, ITEM_FEATURES_TEST_PATH):
+        if path.exists():
+            return path
+    return None
+
+
+def enrich_with_item_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach item-level numeric features used by ranking models."""
+
+    required_columns = ("popularity", "avg_price", "item_age_days", "is_new_item")
+    missing_columns = [column for column in required_columns if column not in df.columns]
+    if not missing_columns:
+        return df
+
+    item_feature_path = _resolve_item_features_path()
+    if item_feature_path is None:
+        LOGGER.warning("Item feature file not found. Continuing without additional ranking item features.")
+        enriched = df.copy()
+        for column in missing_columns:
+            if column == "is_new_item":
+                enriched[column] = False
+            else:
+                enriched[column] = 0.0
+        return enriched
+
+    item_features = pd.read_csv(item_feature_path, dtype={"article_id": str}).fillna("")
+    merge_columns = ["article_id", *[column for column in required_columns if column in item_features.columns]]
+    enriched = df.merge(
+        item_features.loc[:, merge_columns].drop_duplicates("article_id"),
+        on="article_id",
+        how="left",
+        suffixes=("", "_item"),
+    )
+
+    for column in ("popularity", "avg_price", "item_age_days"):
+        if column not in enriched.columns:
+            enriched[column] = 0.0
+        enriched[column] = pd.to_numeric(enriched[column], errors="coerce").fillna(0.0)
+
+    if "is_new_item" not in enriched.columns:
+        enriched["is_new_item"] = 0
+    else:
+        normalized = (
+            enriched["is_new_item"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"1", "true", "yes", "y"})
+            .astype(int)
+        )
+        enriched["is_new_item"] = normalized
+
+    LOGGER.info("Merged ranking item features from %s", item_feature_path)
+    return enriched
 
 
 def build_training_matrices(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
-    """Split a training DataFrame into features and target.
-
-    Identifier columns are excluded from baseline features because they are not
-    intended to be used directly as raw model inputs in this stage.
-    """
-
-    present_excluded_columns = [column for column in df.columns if column in LEAKAGE_COLUMNS]
-    for column in present_excluded_columns:
-        if column in {"price", "sales_channel_id"}:
-            LOGGER.warning("Dropping potential leakage column: %s", column)
-
     feature_columns = [column for column in df.columns if column not in LEAKAGE_COLUMNS]
-
     if not feature_columns:
-        raise ValueError("No usable feature columns found after excluding leakage and identifier columns.")
-
-    features = df.loc[:, feature_columns].copy()
-    target = df[TARGET_COLUMN].copy()
-
-    LOGGER.info(
-        "Using %s feature columns (excluded %s leakage/id columns) | total columns=%s | excluded=%s",
-        len(feature_columns),
-        len(present_excluded_columns),
-        len(df.columns),
-        present_excluded_columns,
-    )
-    return features, target, feature_columns
+        raise ValueError("No usable feature columns found.")
+    return df.loc[:, feature_columns].copy(), df[TARGET_COLUMN].copy(), feature_columns
 
 
 def infer_feature_types(features: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """Infer numeric and categorical feature columns from a feature frame."""
-
     numeric_columns = features.select_dtypes(include=["number", "bool"]).columns.tolist()
     categorical_columns = [column for column in features.columns if column not in numeric_columns]
     return numeric_columns, categorical_columns
 
 
 def cast_numeric_features_to_float(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert numeric features to float before numeric imputation.
-
-    This keeps missing numeric values compatible with a float fill value even
-    when the source columns are integer-typed.
-    """
-
     return frame.astype("float64")
 
 
-def build_numeric_preprocessor(numeric_columns: list[str]) -> tuple[str, Pipeline, list[str]] | None:
-    """Build the numeric preprocessing branch."""
-
-    if not numeric_columns:
-        return None
-
-    numeric_pipeline = Pipeline(
-        steps=[
-            ("to_float", FunctionTransformer(cast_numeric_features_to_float, validate=False)),
-            ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-        ]
-    )
-    return ("numeric", numeric_pipeline, numeric_columns)
-
-
-def build_categorical_preprocessor(
-    categorical_columns: list[str],
-) -> tuple[str, Pipeline, list[str]] | None:
-    """Build the categorical preprocessing branch."""
-
-    if not categorical_columns:
-        return None
-
-    categorical_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="constant", fill_value="UNKNOWN")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore")),
-        ]
-    )
-    return ("categorical", categorical_pipeline, categorical_columns)
-
-
-def build_preprocessor(
-    numeric_columns: list[str],
-    categorical_columns: list[str],
-) -> ColumnTransformer:
-    """Build a preprocessing transformer for baseline ranking features."""
-
+def build_preprocessor(numeric_columns: list[str], categorical_columns: list[str]) -> ColumnTransformer:
     transformers: list[tuple[str, Pipeline, list[str]]] = []
-
-    numeric_transformer = build_numeric_preprocessor(numeric_columns)
-    if numeric_transformer is not None:
-        transformers.append(numeric_transformer)
-
-    categorical_transformer = build_categorical_preprocessor(categorical_columns)
-    if categorical_transformer is not None:
-        transformers.append(categorical_transformer)
-
+    if numeric_columns:
+        transformers.append(
+            (
+                "numeric",
+                Pipeline(
+                    steps=[
+                        ("to_float", FunctionTransformer(cast_numeric_features_to_float, validate=False)),
+                        ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                    ]
+                ),
+                numeric_columns,
+            )
+        )
+    if categorical_columns:
+        transformers.append(
+            (
+                "categorical",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="constant", fill_value="UNKNOWN")),
+                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical_columns,
+            )
+        )
     if not transformers:
-        raise ValueError("Preprocessor requires at least one numeric or categorical feature column.")
-
+        raise ValueError("Preprocessor requires at least one feature column.")
     return ColumnTransformer(transformers=transformers, remainder="drop")
 
 
-def build_model_pipeline(
+def build_model_pipeline(numeric_columns: list[str], categorical_columns: list[str]) -> Pipeline:
+    return build_model_pipeline_with_max_iter(
+        numeric_columns=numeric_columns,
+        categorical_columns=categorical_columns,
+        max_iter=DEFAULT_LOGREG_MAX_ITER,
+    )
+
+
+def build_model_pipeline_with_max_iter(
     numeric_columns: list[str],
     categorical_columns: list[str],
+    max_iter: int,
 ) -> Pipeline:
-    """Build the end-to-end baseline ranking pipeline."""
-
-    preprocessor = build_preprocessor(numeric_columns, categorical_columns)
-    classifier = LogisticRegression(max_iter=1000, solver="lbfgs")
     return Pipeline(
         steps=[
-            ("preprocessor", preprocessor),
-            ("classifier", classifier),
+            ("preprocessor", build_preprocessor(numeric_columns, categorical_columns)),
+            ("classifier", LogisticRegression(max_iter=max_iter, solver="lbfgs")),
         ]
     )
 
 
 def split_train_validation(
-    features: pd.DataFrame,
+    data: pd.DataFrame,
     target: pd.Series,
-    validation_size: float = DEFAULT_VALIDATION_SIZE,
-    random_state: int = DEFAULT_RANDOM_STATE,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Create train/validation splits with a safe stratification fallback."""
+    validation_size: float,
+    random_state: int,
+    split_mode: str = "row",
+) -> tuple[pd.Index, pd.Index]:
+    if split_mode == "user":
+        if "customer_id" not in data.columns:
+            raise ValueError("User-level split requires a customer_id column in the training data.")
+        unique_users = np.asarray(sorted(data["customer_id"].astype(str).unique().tolist()))
+        if unique_users.size < 2:
+            raise ValueError("User-level split requires at least two distinct users.")
+        train_users, valid_users = train_test_split(
+            unique_users,
+            test_size=validation_size,
+            random_state=random_state,
+        )
+        train_mask = data["customer_id"].astype(str).isin(set(train_users))
+        valid_mask = data["customer_id"].astype(str).isin(set(valid_users))
+        train_index = data.index[train_mask]
+        valid_index = data.index[valid_mask]
+        if train_index.empty or valid_index.empty:
+            raise ValueError("User-level split produced an empty train or validation set.")
+        return train_index, valid_index
+
+    if split_mode != "row":
+        raise ValueError(f"Unsupported split_mode: {split_mode}")
 
     stratify_target: pd.Series | None = None
-    target_value_counts = target.value_counts(dropna=False)
-    if len(target_value_counts) > 1 and target_value_counts.min() >= 2:
+    counts = target.value_counts(dropna=False)
+    if len(counts) > 1 and counts.min() >= 2:
         stratify_target = target
-
-    return train_test_split(
-        features,
-        target,
+    train_index, valid_index = train_test_split(
+        data.index,
         test_size=validation_size,
         random_state=random_state,
         stratify=stratify_target,
     )
+    return pd.Index(train_index), pd.Index(valid_index)
 
 
 def compute_validation_auc(model: Pipeline, x_valid: pd.DataFrame, y_valid: pd.Series) -> float | None:
-    """Compute validation ROC-AUC when the validation target has both classes."""
-
     if y_valid.nunique(dropna=False) < 2:
-        LOGGER.warning("Validation ROC-AUC skipped because validation labels contain only one class.")
         return None
-
     probabilities = model.predict_proba(x_valid)[:, 1]
     return float(roc_auc_score(y_valid, probabilities))
 
 
 def save_artifacts(model: Pipeline, metadata: TrainingArtifacts, output_dir: Path) -> dict[str, Path]:
-    """Persist the trained model and metadata inside the checkpoint directory."""
-
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-
     pipeline_path = output_dir / PIPELINE_ARTIFACT_NAME
     metadata_path = output_dir / METADATA_ARTIFACT_NAME
-
-    LOGGER.info("Saving ranking pipeline to %s", pipeline_path)
     joblib.dump(model, pipeline_path)
-
-    LOGGER.info("Saving ranking metadata to %s", metadata_path)
     metadata_path.write_text(json.dumps(asdict(metadata), indent=2), encoding="utf-8")
-
     return {"pipeline_path": pipeline_path, "metadata_path": metadata_path}
 
 
@@ -276,50 +292,33 @@ def train_ranker(
     output_dir: Path = DEFAULT_CHECKPOINT_DIR,
     validation_size: float = DEFAULT_VALIDATION_SIZE,
     random_state: int = DEFAULT_RANDOM_STATE,
+    split_mode: str = "row",
+    max_iter: int = DEFAULT_LOGREG_MAX_ITER,
 ) -> dict[str, Any]:
-    """Train the baseline ranker and save checkpoint artifacts.
-
-    Args:
-        csv_path: Path to the training CSV.
-        output_dir: Directory where artifacts are saved.
-        validation_size: Fraction reserved for validation.
-        random_state: Random seed used for splitting.
-
-    Returns:
-        Summary dictionary describing the training run and saved artifacts.
-    """
-
     df = load_training_data(csv_path)
     features, target, feature_columns = build_training_matrices(df)
     if target.nunique(dropna=False) < 2:
-        raise ValueError("Ranking training requires at least two target classes in the label column.")
+        raise ValueError("Ranking training requires at least two target classes.")
 
     numeric_columns, categorical_columns = infer_feature_types(features)
-
-    LOGGER.info(
-        "Feature types resolved: %s numeric, %s categorical",
-        len(numeric_columns),
-        len(categorical_columns),
+    train_index, valid_index = split_train_validation(
+        df,
+        target,
+        validation_size,
+        random_state,
+        split_mode=split_mode,
     )
-
-    x_train, x_valid, y_train, y_valid = split_train_validation(
-        features=features,
-        target=target,
-        validation_size=validation_size,
-        random_state=random_state,
+    x_train = features.loc[train_index].copy()
+    x_valid = features.loc[valid_index].copy()
+    y_train = target.loc[train_index].copy()
+    y_valid = target.loc[valid_index].copy()
+    model = build_model_pipeline_with_max_iter(
+        numeric_columns=numeric_columns,
+        categorical_columns=categorical_columns,
+        max_iter=max_iter,
     )
-
-    LOGGER.info(
-        "Training baseline ranker on %s rows, validating on %s rows",
-        len(x_train),
-        len(x_valid),
-    )
-    model = build_model_pipeline(numeric_columns=numeric_columns, categorical_columns=categorical_columns)
     model.fit(x_train, y_train)
-
-    validation_auc = compute_validation_auc(model=model, x_valid=x_valid, y_valid=y_valid)
-    if validation_auc is not None:
-        LOGGER.info("Validation ROC-AUC: %.6f", validation_auc)
+    validation_auc = compute_validation_auc(model, x_valid, y_valid)
 
     metadata = TrainingArtifacts(
         target_column=TARGET_COLUMN,
@@ -331,62 +330,308 @@ def train_ranker(
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         validation_size=validation_size,
         random_state=random_state,
+        split_mode=split_mode,
     )
-    saved_paths = save_artifacts(model=model, metadata=metadata, output_dir=output_dir)
-
-    summary: dict[str, Any] = {
-        "train_rows": int(len(x_train)),
-        "validation_rows": int(len(x_valid)),
-        "feature_count": int(len(feature_columns)),
-        "numeric_feature_count": int(len(numeric_columns)),
-        "categorical_feature_count": int(len(categorical_columns)),
+    artifact_paths = save_artifacts(model, metadata, output_dir)
+    return {
+        "model_type": "logreg",
+        "training_rows": len(x_train),
+        "validation_rows": len(x_valid),
         "validation_auc": validation_auc,
-        "pipeline_path": str(saved_paths["pipeline_path"]),
-        "metadata_path": str(saved_paths["metadata_path"]),
+        "max_iter": max_iter,
+        "artifacts": {key: str(path) for key, path in artifact_paths.items()},
+        "metadata": asdict(metadata),
     }
-    return summary
+
+
+def _normalize_categorical_value(value: Any) -> str:
+    if value is None:
+        return "UNKNOWN"
+    text = str(value).strip()
+    return text if text else "UNKNOWN"
+
+
+def _build_categorical_vocabularies(features: pd.DataFrame, categorical_columns: list[str]) -> dict[str, dict[str, int]]:
+    vocabularies: dict[str, dict[str, int]] = {}
+    for column in categorical_columns:
+        tokens = ["UNKNOWN"]
+        seen = {"UNKNOWN"}
+        for value in features[column].tolist():
+            token = _normalize_categorical_value(value)
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+        vocabularies[column] = {token: index for index, token in enumerate(tokens)}
+    return vocabularies
+
+
+def _encode_categorical_frame(
+    features: pd.DataFrame,
+    categorical_columns: list[str],
+    vocabularies: dict[str, dict[str, int]],
+) -> np.ndarray:
+    if not categorical_columns:
+        return np.zeros((len(features), 0), dtype=np.int64)
+    encoded: list[np.ndarray] = []
+    for column in categorical_columns:
+        vocab = vocabularies[column]
+        encoded.append(np.asarray([vocab.get(_normalize_categorical_value(v), 0) for v in features[column].tolist()], dtype=np.int64))
+    return np.stack(encoded, axis=1)
+
+
+def _fit_numeric_preprocessor(
+    features: pd.DataFrame,
+    numeric_columns: list[str],
+) -> tuple[np.ndarray, dict[str, float], dict[str, float], dict[str, float]]:
+    if not numeric_columns:
+        return np.zeros((len(features), 0), dtype=np.float32), {}, {}, {}
+    numeric_frame = features.loc[:, numeric_columns].apply(pd.to_numeric, errors="coerce")
+    fill_values = {
+        column: float(numeric_frame[column].median()) if numeric_frame[column].notna().any() else 0.0
+        for column in numeric_columns
+    }
+    filled = numeric_frame.fillna(fill_values)
+    means = {column: float(filled[column].mean()) for column in numeric_columns}
+    stds = {
+        column: float(filled[column].std()) if float(filled[column].std()) > 1e-8 else 1.0
+        for column in numeric_columns
+    }
+    normalized = filled.copy()
+    for column in numeric_columns:
+        normalized[column] = (normalized[column] - means[column]) / stds[column]
+    return normalized.to_numpy(dtype=np.float32), fill_values, means, stds
+
+
+def _apply_numeric_preprocessor(
+    features: pd.DataFrame,
+    numeric_columns: list[str],
+    fill_values: dict[str, float],
+    means: dict[str, float],
+    stds: dict[str, float],
+) -> np.ndarray:
+    if not numeric_columns:
+        return np.zeros((len(features), 0), dtype=np.float32)
+    numeric_frame = features.loc[:, numeric_columns].apply(pd.to_numeric, errors="coerce").fillna(fill_values)
+    normalized = numeric_frame.copy()
+    for column in numeric_columns:
+        normalized[column] = (normalized[column] - means[column]) / stds[column]
+    return normalized.to_numpy(dtype=np.float32)
+
+
+def _deepfm_dataloader(
+    categorical_x: np.ndarray,
+    numeric_x: np.ndarray,
+    labels: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+) -> DataLoader:
+    _require_torch()
+    dataset = TensorDataset(
+        torch.as_tensor(categorical_x, dtype=torch.long),
+        torch.as_tensor(numeric_x, dtype=torch.float32),
+        torch.as_tensor(labels, dtype=torch.float32),
+    )
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+def save_deepfm_artifacts(model: DeepFMRanker, metadata: dict[str, Any], output_dir: Path) -> dict[str, Path]:
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / DEEPFM_ARTIFACT_NAME
+    metadata_path = output_dir / DEEPFM_METADATA_ARTIFACT_NAME
+    torch.save({"model_state_dict": model.state_dict(), "metadata": metadata}, model_path)
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return {"model_path": model_path, "metadata_path": metadata_path}
+
+
+def train_deepfm_ranker(
+    csv_path: Path,
+    output_dir: Path = DEFAULT_CHECKPOINT_DIR,
+    validation_size: float = DEFAULT_VALIDATION_SIZE,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    batch_size: int = DEFAULT_DEEPFM_BATCH_SIZE,
+    epochs: int = DEFAULT_DEEPFM_EPOCHS,
+    learning_rate: float = DEFAULT_DEEPFM_LEARNING_RATE,
+    weight_decay: float = DEFAULT_DEEPFM_WEIGHT_DECAY,
+    embedding_dim: int = 16,
+    device: str | None = None,
+    split_mode: str = "row",
+) -> dict[str, Any]:
+    _require_torch()
+    df = load_training_data(csv_path)
+    features, target, feature_columns = build_training_matrices(df)
+    numeric_columns, categorical_columns = infer_feature_types(features)
+    train_index, valid_index = split_train_validation(
+        df,
+        target,
+        validation_size,
+        random_state,
+        split_mode=split_mode,
+    )
+    x_train = features.loc[train_index].copy()
+    x_valid = features.loc[valid_index].copy()
+    y_train = target.loc[train_index].copy()
+    y_valid = target.loc[valid_index].copy()
+
+    vocabularies = _build_categorical_vocabularies(x_train, categorical_columns)
+    x_train_cat = _encode_categorical_frame(x_train, categorical_columns, vocabularies)
+    x_valid_cat = _encode_categorical_frame(x_valid, categorical_columns, vocabularies)
+    x_train_num, fill_values, means, stds = _fit_numeric_preprocessor(x_train, numeric_columns)
+    x_valid_num = _apply_numeric_preprocessor(x_valid, numeric_columns, fill_values, means, stds)
+
+    config = DeepFMConfig(
+        categorical_cardinalities=[len(vocabularies[column]) for column in categorical_columns],
+        numeric_dim=len(numeric_columns),
+        embedding_dim=embedding_dim,
+    )
+    resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model = DeepFMRanker(config).to(resolved_device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    criterion = nn.BCEWithLogitsLoss()
+    train_loader = _deepfm_dataloader(
+        x_train_cat,
+        x_train_num,
+        y_train.to_numpy(dtype=np.float32),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    valid_cat_tensor = torch.as_tensor(x_valid_cat, dtype=torch.long, device=resolved_device)
+    valid_num_tensor = torch.as_tensor(x_valid_num, dtype=torch.float32, device=resolved_device)
+
+    best_auc = float("-inf")
+    best_epoch = 0
+    best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+    history: list[dict[str, float]] = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running_loss = 0.0
+        total_rows = 0
+        for batch_cat, batch_num, batch_y in train_loader:
+            batch_cat = batch_cat.to(resolved_device)
+            batch_num = batch_num.to(resolved_device)
+            batch_y = batch_y.to(resolved_device)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(batch_cat, batch_num)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+            actual_batch = batch_cat.shape[0]
+            running_loss += float(loss.item()) * actual_batch
+            total_rows += actual_batch
+
+        model.eval()
+        with torch.no_grad():
+            valid_logits = model(valid_cat_tensor, valid_num_tensor)
+            valid_probs = torch.sigmoid(valid_logits).detach().cpu().numpy()
+        validation_auc = float(roc_auc_score(y_valid, valid_probs)) if y_valid.nunique(dropna=False) > 1 else 0.0
+        train_loss = running_loss / max(total_rows, 1)
+        history.append({"epoch": float(epoch), "train_loss": train_loss, "validation_auc": validation_auc})
+        LOGGER.info(
+            "DeepFM epoch %s/%s | train_loss=%.6f | validation_auc=%.6f",
+            epoch,
+            epochs,
+            train_loss,
+            validation_auc,
+        )
+        if validation_auc > best_auc:
+            best_auc = validation_auc
+            best_epoch = epoch
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+    model.load_state_dict(best_state)
+    metadata = {
+        "model_type": "deepfm",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "target_column": TARGET_COLUMN,
+        "identifier_columns": list(IDENTIFIER_COLUMNS),
+        "feature_columns": feature_columns,
+        "numeric_columns": numeric_columns,
+        "categorical_columns": categorical_columns,
+        "categorical_vocabularies": vocabularies,
+        "numeric_fill_values": fill_values,
+        "numeric_means": means,
+        "numeric_stds": stds,
+        "best_validation_auc": best_auc,
+        "best_epoch": best_epoch,
+        "deepfm_config": asdict(config),
+        "training_config": {
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "validation_size": validation_size,
+            "random_state": random_state,
+            "device": resolved_device,
+            "split_mode": split_mode,
+        },
+    }
+    artifact_paths = save_deepfm_artifacts(model, metadata, output_dir)
+    return {
+        "model_type": "deepfm",
+        "training_rows": len(x_train),
+        "validation_rows": len(x_valid),
+        "validation_auc": best_auc,
+        "best_epoch": best_epoch,
+        "artifacts": {key: str(path) for key, path in artifact_paths.items()},
+        "metadata": metadata,
+        "history": history,
+    }
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for baseline ranking training."""
-
-    parser = argparse.ArgumentParser(description="Train the baseline ranking model.")
-    parser.add_argument("--data", type=Path, required=True, help="Path to the ranking training CSV.")
+    parser = argparse.ArgumentParser(description="Train a ranking model from processed tabular data.")
+    parser.add_argument("--data", type=Path, default=DEFAULT_TRAINING_DATA_PATH, help="Path to the ranking training CSV.")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR, help="Directory for ranking artifacts.")
+    parser.add_argument("--model-type", choices=("logreg", "deepfm"), default="logreg", help="Ranking model to train.")
+    parser.add_argument("--validation-size", type=float, default=DEFAULT_VALIDATION_SIZE, help="Validation split ratio.")
+    parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE, help="Random seed for train/validation splitting.")
+    parser.add_argument("--max-iter", type=int, default=DEFAULT_LOGREG_MAX_ITER, help="Maximum LBFGS iterations for logistic ranking.")
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_CHECKPOINT_DIR,
-        help="Checkpoint directory for ranking artifacts.",
+        "--split-mode",
+        choices=("row", "user"),
+        default="row",
+        help="Validation split strategy. Use 'user' to avoid customer-level leakage.",
     )
-    parser.add_argument(
-        "--validation-size",
-        type=float,
-        default=DEFAULT_VALIDATION_SIZE,
-        help="Validation split ratio.",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=DEFAULT_RANDOM_STATE,
-        help="Random seed used for the train/validation split.",
-    )
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_DEEPFM_BATCH_SIZE, help="DeepFM batch size.")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_DEEPFM_EPOCHS, help="DeepFM training epochs.")
+    parser.add_argument("--learning-rate", type=float, default=DEFAULT_DEEPFM_LEARNING_RATE, help="DeepFM learning rate.")
+    parser.add_argument("--weight-decay", type=float, default=DEFAULT_DEEPFM_WEIGHT_DECAY, help="DeepFM weight decay.")
+    parser.add_argument("--embedding-dim", type=int, default=16, help="DeepFM embedding dimension.")
+    parser.add_argument("--device", type=str, help="DeepFM device override, e.g. cpu or cuda.")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser.parse_args()
 
 
 def main() -> None:
-    """CLI entry point for baseline ranking training."""
-
     args = parse_args()
     configure_logging(verbose=args.verbose)
-
-    summary = train_ranker(
-        csv_path=args.data,
-        output_dir=args.output_dir,
-        validation_size=args.validation_size,
-        random_state=args.random_state,
-    )
-    LOGGER.info("Training finished: %s", summary)
+    if args.model_type == "logreg":
+        summary = train_ranker(
+            csv_path=args.data,
+            output_dir=args.output_dir,
+            validation_size=args.validation_size,
+            random_state=args.random_state,
+            split_mode=args.split_mode,
+            max_iter=args.max_iter,
+        )
+    else:
+        summary = train_deepfm_ranker(
+            csv_path=args.data,
+            output_dir=args.output_dir,
+            validation_size=args.validation_size,
+            random_state=args.random_state,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            embedding_dim=args.embedding_dim,
+            device=args.device,
+            split_mode=args.split_mode,
+        )
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

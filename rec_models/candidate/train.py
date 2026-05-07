@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import copy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,7 +77,9 @@ class TrainingConfig:
     learning_rate: float = DEFAULT_LEARNING_RATE
     weight_decay: float = DEFAULT_WEIGHT_DECAY
     validation_ratio: float = 0.2
+    split_mode: str = "leave_last_out"
     validation_k: int = DEFAULT_VALIDATION_K
+    validation_max_users: int | None = 5000
     negatives_per_positive: int = DEFAULT_NEGATIVES_PER_POSITIVE
     hard_negative_ratio: float = DEFAULT_HARD_NEGATIVE_RATIO
     sampled_negative_weight: float = DEFAULT_SAMPLED_NEGATIVE_WEIGHT
@@ -94,7 +97,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE, help="Adam learning rate.")
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY, help="AdamW weight decay.")
     parser.add_argument("--validation-ratio", type=float, default=0.2, help="User-level validation holdout ratio.")
+    parser.add_argument(
+        "--split-mode",
+        choices=("leave_last_out", "user"),
+        default="leave_last_out",
+        help="Validation split strategy. leave_last_out holds out each user's final interaction.",
+    )
     parser.add_argument("--validation-k", type=int, default=DEFAULT_VALIDATION_K, help="Recall@K cutoff for validation.")
+    parser.add_argument(
+        "--validation-max-users",
+        type=int,
+        default=5000,
+        help="Cap validation users during training for faster feedback. Use 0 to evaluate every validation user.",
+    )
     parser.add_argument(
         "--negatives-per-positive",
         type=int,
@@ -143,7 +158,7 @@ def build_dataloader(dataset: TwoTowerPairDataset, batch_size: int, shuffle: boo
 
 def batch_to_device(batch: dict[str, Any], device: str) -> dict[str, Any]:
     moved = dict(batch)
-    for key in ("user_categorical", "user_numeric", "item_categorical", "item_numeric"):
+    for key in ("user_categorical", "user_numeric", "history_item_ids", "history_mask", "item_categorical", "item_numeric", "item_id_index"):
         moved[key] = moved[key].to(device)
     return moved
 
@@ -203,6 +218,7 @@ def sampled_negative_loss(
     negative_item_embedding = model.encode_item(
         item_categorical=negative_batch["item_categorical"],
         item_numeric=negative_batch["item_numeric"],
+        item_id_index=negative_batch.get("item_id_index"),
     )
     batch_size = user_embedding.shape[0]
     negative_item_embedding = negative_item_embedding.view(batch_size, negatives_per_positive, -1)
@@ -234,8 +250,11 @@ def train_one_epoch(
         outputs = model(
             user_categorical=prepared["user_categorical"],
             user_numeric=prepared["user_numeric"],
+            history_item_ids=prepared["history_item_ids"],
+            history_mask=prepared["history_mask"],
             item_categorical=prepared["item_categorical"],
             item_numeric=prepared["item_numeric"],
+            item_id_index=prepared["item_id_index"],
         )
         loss = retrieval_loss(outputs["logits"])
         if negatives_per_positive > 0:
@@ -292,9 +311,18 @@ def build_item_embedding_index(
     item_categorical = torch.as_tensor(_stack_encoded_rows(encoded_rows, "categorical"), dtype=torch.long, device=device)
     item_numeric_np = _stack_encoded_rows(encoded_rows, "numeric").astype(np.float32)
     item_numeric = torch.as_tensor(item_numeric_np, dtype=torch.float32, device=device)
+    item_id_index = torch.as_tensor(
+        np.asarray([row["item_id_index"] for row in encoded_rows], dtype=np.int64),
+        dtype=torch.long,
+        device=device,
+    )
 
     with torch.no_grad():
-        embeddings = model.encode_item(item_categorical=item_categorical, item_numeric=item_numeric)
+        embeddings = model.encode_item(
+            item_categorical=item_categorical,
+            item_numeric=item_numeric,
+            item_id_index=item_id_index,
+        )
     return embeddings.detach().cpu().numpy().astype(np.float32), item_ids
 
 
@@ -303,6 +331,7 @@ def evaluate_recall(
     dataset_artifacts: DatasetArtifacts,
     device: str,
     k: int,
+    max_users: int | None = None,
 ) -> float:
     """Compute validation Recall@K against the known item universe."""
 
@@ -320,12 +349,16 @@ def evaluate_recall(
 
     model.eval()
     with torch.no_grad():
-        for customer_id, positive_item_ids in validation_dataset.user_to_positive_items.items():
+        validation_items = list(validation_dataset.user_to_positive_items.items())
+        if max_users is not None and len(validation_items) > max_users:
+            validation_items = validation_items[:max_users]
+        for customer_id, positive_item_ids in validation_items:
             user_record = validation_dataset.user_records.get(customer_id)
             if user_record is None:
                 continue
 
             encoded_user = dataset_artifacts.encoder.encode_user_row(user_record)
+            encoded_history = dataset_artifacts.encoder.encode_history_item_ids(user_record.get("history_article_ids", ""))
             user_categorical = torch.as_tensor(
                 encoded_user["categorical"][None, :],
                 dtype=torch.long,
@@ -336,7 +369,22 @@ def evaluate_recall(
                 dtype=torch.float32,
                 device=device,
             )
-            user_embedding = model.encode_user(user_categorical=user_categorical, user_numeric=user_numeric)
+            history_item_ids = torch.as_tensor(
+                encoded_history["ids"][None, :],
+                dtype=torch.long,
+                device=device,
+            )
+            history_mask = torch.as_tensor(
+                encoded_history["mask"][None, :],
+                dtype=torch.float32,
+                device=device,
+            )
+            user_embedding = model.encode_user(
+                user_categorical=user_categorical,
+                user_numeric=user_numeric,
+                history_item_ids=history_item_ids,
+                history_mask=history_mask,
+            )
             scores = torch.matmul(user_embedding, item_matrix.transpose(0, 1)).squeeze(0)
             top_k = min(k, scores.shape[0])
             top_indices = torch.topk(scores, k=top_k, dim=0).indices.detach().cpu().tolist()
@@ -351,6 +399,7 @@ def save_artifacts(
     dataset_artifacts: DatasetArtifacts,
     training_config: TrainingConfig,
     best_validation_recall: float,
+    best_epoch: int,
 ) -> dict[str, Path]:
     """Persist the trained Two-Tower weights and training metadata."""
 
@@ -370,6 +419,7 @@ def save_artifacts(
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "best_validation_recall": best_validation_recall,
+        "best_epoch": best_epoch,
         "training_config": asdict(training_config),
         "dataset_metadata": dataset_artifacts.metadata,
     }
@@ -388,6 +438,7 @@ def train_two_tower(training_config: TrainingConfig) -> dict[str, Any]:
     dataset_artifacts = build_two_tower_datasets(
         csv_path=Path(training_config.data_path),
         validation_ratio=training_config.validation_ratio,
+        split_mode=training_config.split_mode,
     )
     model_config: TwoTowerConfig = build_two_tower_config_from_metadata(dataset_artifacts.metadata)
     model = TwoTowerModel(model_config).to(training_config.device)
@@ -404,6 +455,8 @@ def train_two_tower(training_config: TrainingConfig) -> dict[str, Any]:
     )
 
     best_validation_recall = float("-inf")
+    best_epoch = 0
+    best_model_state = copy.deepcopy(model.state_dict())
     history: list[dict[str, float]] = []
 
     for epoch in range(1, training_config.epochs + 1):
@@ -422,6 +475,7 @@ def train_two_tower(training_config: TrainingConfig) -> dict[str, Any]:
             dataset_artifacts=dataset_artifacts,
             device=training_config.device,
             k=training_config.validation_k,
+            max_users=training_config.validation_max_users,
         )
         history.append(
             {
@@ -438,16 +492,23 @@ def train_two_tower(training_config: TrainingConfig) -> dict[str, Any]:
             training_config.validation_k,
             validation_recall,
         )
-        best_validation_recall = max(best_validation_recall, validation_recall)
+        if validation_recall > best_validation_recall:
+            best_validation_recall = validation_recall
+            best_epoch = epoch
+            best_model_state = copy.deepcopy(model.state_dict())
+
+    model.load_state_dict(best_model_state)
 
     saved_paths = save_artifacts(
         model=model,
         dataset_artifacts=dataset_artifacts,
         training_config=training_config,
         best_validation_recall=best_validation_recall,
+        best_epoch=best_epoch,
     )
     return {
         "best_validation_recall": best_validation_recall,
+        "best_epoch": best_epoch,
         "history": history,
         "saved_paths": {key: str(path) for key, path in saved_paths.items()},
     }
@@ -465,7 +526,9 @@ def main() -> None:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         validation_ratio=args.validation_ratio,
+        split_mode=args.split_mode,
         validation_k=args.validation_k,
+        validation_max_users=None if args.validation_max_users == 0 else args.validation_max_users,
         negatives_per_positive=args.negatives_per_positive,
         hard_negative_ratio=args.hard_negative_ratio,
         sampled_negative_weight=args.sampled_negative_weight,

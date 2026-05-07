@@ -17,7 +17,8 @@ try:
         build_evaluation_context,
         load_evaluation_data,
     )
-    from rec_models.serving.candidate_service import load_article_catalog
+    from rec_models.common.utils import build_experiment_report, write_json_report
+    from rec_models.serving.candidate_service import generate_candidates, load_article_catalog
     from rec_models.serving.recommend_service import rank_candidates_to_recommendations
     from rec_models.serving.ranking_service import load_customer_features, score_candidate_batch
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
@@ -28,20 +29,35 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
         build_evaluation_context,
         load_evaluation_data,
     )
-    from serving.candidate_service import load_article_catalog  # type: ignore[no-redef]
+    from common.utils import build_experiment_report, write_json_report  # type: ignore[no-redef]
+    from serving.candidate_service import generate_candidates, load_article_catalog  # type: ignore[no-redef]
     from serving.recommend_service import rank_candidates_to_recommendations  # type: ignore[no-redef]
     from serving.ranking_service import load_customer_features, score_candidate_batch  # type: ignore[no-redef]
 
 
 DEFAULT_TOP_K = 50
+DEFAULT_EVALUATION_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "processed" / "train_data_dev.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the recommendation pipeline offline.")
-    parser.add_argument("--data", type=Path, required=True, help="Path to processed recommendation test data.")
+    parser.add_argument("--data", type=Path, default=DEFAULT_EVALUATION_DATA_PATH, help="Path to processed recommendation test data.")
     parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K, help="Cutoff K for ranking metrics.")
+    parser.add_argument("--candidate-k", type=int, default=300, help="Recorded candidate cutoff K for experiment metadata.")
+    parser.add_argument("--experiment-name", type=str, default="recommendation_eval", help="Stable experiment name for saved reports.")
+    parser.add_argument("--seed", type=int, default=42, help="Recorded random seed for reproducibility metadata.")
+    parser.add_argument("--split-name", type=str, default="unspecified", help="Recorded split name for experiment metadata.")
     parser.add_argument("--output-json", type=Path, help="Optional output path for JSON metrics.")
     parser.add_argument("--max-users", type=int, help="Optional cap for smoke checks or faster iteration.")
+    parser.add_argument("--disable-reranking", action="store_true", help="Disable all reranking logic and use ranking order only.")
+    parser.add_argument("--disable-diversity", action="store_true", help="Disable diversity control during reranking.")
+    parser.add_argument("--disable-exploration", action="store_true", help="Disable exploration slot injection during reranking.")
+    parser.add_argument("--disable-freshness", action="store_true", help="Disable freshness-based new item boost during exploration.")
+    parser.add_argument(
+        "--use-serving-candidates",
+        action="store_true",
+        help="Evaluate end-to-end with serving candidate generation instead of only reranking provided candidate rows.",
+    )
     parser.add_argument(
         "--skip-popularity-baseline",
         action="store_true",
@@ -123,21 +139,34 @@ def compute_metric_summary(
 def evaluate_recommender(
     data: pd.DataFrame,
     top_k: int,
+    candidate_k: int = 300,
     max_users: int | None = None,
     context: EvaluationContext | None = None,
+    enable_reranking: bool = True,
+    enable_diversity: bool = True,
+    enable_exploration: bool = True,
+    enable_freshness: bool = True,
+    use_serving_candidates: bool = False,
 ) -> dict[str, Any]:
     """Evaluate the current serving ranking+rerranking pipeline."""
 
     evaluation_context = context or build_evaluation_context(data, max_users=max_users)
     cold_start_users = build_cold_start_user_set(evaluation_context.sampled_user_ids)
-    user_set = set(evaluation_context.sampled_user_ids)
-    scored_batch = score_candidate_batch(
-        data.loc[data["customer_id"].astype(str).isin(user_set)].copy()
+    total_candidate_count = (
+        int(load_article_catalog()["article_id"].astype(str).nunique())
+        if use_serving_candidates
+        else evaluation_context.total_candidate_count
     )
-    scored_rows_by_id = {
-        str(user_id): user_rows.copy()
-        for user_id, user_rows in scored_batch.groupby("customer_id", sort=False)
-    }
+    scored_rows_by_id: dict[str, pd.DataFrame] = {}
+    if not use_serving_candidates:
+        user_set = set(evaluation_context.sampled_user_ids)
+        scored_batch = score_candidate_batch(
+            data.loc[data["customer_id"].astype(str).isin(user_set)].copy()
+        )
+        scored_rows_by_id = {
+            str(user_id): user_rows.copy()
+            for user_id, user_rows in scored_batch.groupby("customer_id", sort=False)
+        }
 
     ranked_lists: list[list[str]] = []
     relevant_lists: list[list[str]] = []
@@ -146,16 +175,32 @@ def evaluate_recommender(
 
     for user_id in evaluation_context.sampled_user_ids:
         user_rows = evaluation_context.user_rows_by_id.get(user_id)
-        scored_user_rows = scored_rows_by_id.get(user_id)
-        if user_rows is None or user_rows.empty or scored_user_rows is None or scored_user_rows.empty:
+        if user_rows is None or user_rows.empty:
             continue
 
         session_context = build_session_context(user_rows)
+        if use_serving_candidates:
+            scored_user_rows = generate_candidates(
+                user_id=user_id,
+                top_k=candidate_k,
+                recent_clicks=session_context.get("recent_clicks"),
+                session_interest=session_context.get("session_interest"),
+            )
+            if scored_user_rows.empty:
+                continue
+        else:
+            scored_user_rows = scored_rows_by_id.get(user_id)
+            if scored_user_rows is None or scored_user_rows.empty:
+                continue
+
         recommendations = rank_candidates_to_recommendations(
             user_id=user_id,
             candidate_items=scored_user_rows,
             top_n=top_k,
             session_context=session_context,
+            enable_diversity=enable_reranking and enable_diversity,
+            enable_exploration=enable_reranking and enable_exploration,
+            enable_freshness=enable_reranking and enable_freshness,
         )
         ranked_items = [str(item["product_id"]) for item in recommendations]
         relevant_items = evaluation_context.ground_truth_by_user[user_id]
@@ -169,14 +214,14 @@ def evaluate_recommender(
     result = compute_metric_summary(
         ranked_lists=ranked_lists,
         relevant_lists=relevant_lists,
-        total_candidate_count=evaluation_context.total_candidate_count,
+        total_candidate_count=total_candidate_count,
         k=top_k,
         evaluated_users=len(ranked_lists),
     )
     result["cold_start_subset"] = compute_metric_summary(
         ranked_lists=cold_ranked_lists,
         relevant_lists=cold_relevant_lists,
-        total_candidate_count=evaluation_context.total_candidate_count,
+        total_candidate_count=total_candidate_count,
         k=top_k,
         evaluated_users=len(cold_ranked_lists),
     )
@@ -186,13 +231,20 @@ def evaluate_recommender(
 def evaluate_popularity_baseline(
     data: pd.DataFrame,
     top_k: int,
+    candidate_k: int = 300,
     max_users: int | None = None,
     context: EvaluationContext | None = None,
+    use_serving_candidates: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a popularity-only baseline on the same user candidate sets."""
 
     evaluation_context = context or build_evaluation_context(data, max_users=max_users)
     cold_start_users = build_cold_start_user_set(evaluation_context.sampled_user_ids)
+    total_candidate_count = (
+        int(load_article_catalog()["article_id"].astype(str).nunique())
+        if use_serving_candidates
+        else evaluation_context.total_candidate_count
+    )
 
     ranked_lists: list[list[str]] = []
     relevant_lists: list[list[str]] = []
@@ -204,7 +256,19 @@ def evaluate_popularity_baseline(
         if user_rows is None or user_rows.empty:
             continue
 
-        ranked_items = popularity_recommendations(user_rows=user_rows, top_k=top_k)
+        if use_serving_candidates:
+            session_context = build_session_context(user_rows)
+            candidate_items = generate_candidates(
+                user_id=user_id,
+                top_k=candidate_k,
+                recent_clicks=session_context.get("recent_clicks"),
+                session_interest=session_context.get("session_interest"),
+            )
+            if candidate_items.empty:
+                continue
+            ranked_items = popularity_recommendations(user_rows=candidate_items, top_k=top_k)
+        else:
+            ranked_items = popularity_recommendations(user_rows=user_rows, top_k=top_k)
         relevant_items = evaluation_context.ground_truth_by_user[user_id]
 
         ranked_lists.append(ranked_items)
@@ -216,14 +280,14 @@ def evaluate_popularity_baseline(
     result = compute_metric_summary(
         ranked_lists=ranked_lists,
         relevant_lists=relevant_lists,
-        total_candidate_count=evaluation_context.total_candidate_count,
+        total_candidate_count=total_candidate_count,
         k=top_k,
         evaluated_users=len(ranked_lists),
     )
     result["cold_start_subset"] = compute_metric_summary(
         ranked_lists=cold_ranked_lists,
         relevant_lists=cold_relevant_lists,
-        total_candidate_count=evaluation_context.total_candidate_count,
+        total_candidate_count=total_candidate_count,
         k=top_k,
         evaluated_users=len(cold_ranked_lists),
     )
@@ -297,10 +361,30 @@ def main() -> None:
     args = parse_args()
 
     data = enrich_candidate_rows(load_evaluation_data(args.data))
-    ranking_metrics = evaluate_recommender(data=data, top_k=args.top_k, max_users=args.max_users)
+    enable_reranking = not args.disable_reranking
+    enable_diversity = not args.disable_diversity
+    enable_exploration = not args.disable_exploration
+    enable_freshness = not args.disable_freshness
+    ranking_metrics = evaluate_recommender(
+        data=data,
+        top_k=args.top_k,
+        candidate_k=args.candidate_k,
+        max_users=args.max_users,
+        enable_reranking=enable_reranking,
+        enable_diversity=enable_diversity,
+        enable_exploration=enable_exploration,
+        enable_freshness=enable_freshness,
+        use_serving_candidates=args.use_serving_candidates,
+    )
     baseline_metrics = None
     if not args.skip_popularity_baseline:
-        baseline_metrics = evaluate_popularity_baseline(data=data, top_k=args.top_k, max_users=args.max_users)
+        baseline_metrics = evaluate_popularity_baseline(
+            data=data,
+            top_k=args.top_k,
+            candidate_k=args.candidate_k,
+            max_users=args.max_users,
+            use_serving_candidates=args.use_serving_candidates,
+        )
 
     results = build_comparison_summary(
         ranking_metrics=ranking_metrics,
@@ -310,9 +394,26 @@ def main() -> None:
     print_evaluation_report(results, top_k=args.top_k)
 
     if args.output_json is not None:
-        output_path = args.output_json.expanduser().resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        report = build_experiment_report(
+            experiment_name=args.experiment_name,
+            stage="recommendation",
+            data_path=args.data,
+            metrics=results,
+            config={
+                "top_k": args.top_k,
+                "candidate_k": args.candidate_k,
+                "max_users": args.max_users,
+                "use_serving_candidates": args.use_serving_candidates,
+                "skip_popularity_baseline": args.skip_popularity_baseline,
+                "enable_reranking": enable_reranking,
+                "enable_diversity": enable_reranking and enable_diversity,
+                "enable_exploration": enable_reranking and enable_exploration,
+                "enable_freshness": enable_reranking and enable_freshness,
+                "seed": args.seed,
+                "split_name": args.split_name,
+            },
+        )
+        output_path = write_json_report(args.output_json, report)
         print(f"\nSaved JSON metrics to {output_path}")
 
 

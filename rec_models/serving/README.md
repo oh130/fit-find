@@ -12,6 +12,49 @@
 - 전체 recommend 파이프라인 진입점 정의
 - rerank 또는 정책 모듈과 연결되는 브릿지 정의
 
+현재 기본 candidate 조합은 다음과 같다.
+
+- sequential article transition
+- sequential category transition
+- Two-Tower retrieval hybrid
+- user profile / recent click / session interest signals
+- coverage exploration candidates
+- co-purchase는 실험용 opt-in
+
+## 현재 채택 설정
+
+2026-05-06 dev 평가 기준으로 serving 추천 파이프라인은 다음 설정을 사용한다.
+
+- Candidate checkpoint:
+  - `data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt`
+- Ranking checkpoint:
+  - `rec_models/checkpoints/logreg_dev/ranking_baseline.joblib`
+- Serving candidate pool:
+  - top-50 요청 기준 75개 후보를 생성해 ranking/reranking에 전달
+- Reranking:
+  - category diversity guard
+  - epsilon-greedy exploration slot
+  - freshness/new item boost
+  - coverage exploration priority
+
+검증 결과:
+
+```text
+Candidate Recall@300 = 0.614632
+Ranking AUC          = 0.956739
+HitRate@50           = 0.497000
+NDCG@50              = 0.178138
+Coverage@50          = 0.215203
+Latency p95          = 187.61ms
+```
+
+주요 report:
+
+- `rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json`
+- `rec_models/reports/ranking_experiments/dev_ranking_logreg.json`
+- `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json`
+- `rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json`
+
 ## 요구사항
 - 학습 스크립트를 직접 호출하지 않아야 한다.
 - 단계별 실패나 빈 결과에 대한 fallback 여지를 고려해야 한다.

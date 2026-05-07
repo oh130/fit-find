@@ -48,6 +48,11 @@ class TwoTowerConfig:
     item_tower: TowerConfig
     output_dim: int = 64
     l2_normalize: bool = True
+    logit_scale: float = 20.0
+    history_item_vocab_size: int = 0
+    history_embedding_dim: int = 32
+    item_id_vocab_size: int = 0
+    item_id_embedding_dim: int = 32
 
 
 class FeatureTower(_BaseModule):
@@ -126,27 +131,93 @@ class TwoTowerModel(_BaseModule):
 
         self.user_tower = FeatureTower(config.user_tower)
         self.item_tower = FeatureTower(config.item_tower)
-        self.user_projection = nn.Linear(self.user_tower.output_dim, config.output_dim)
-        self.item_projection = nn.Linear(self.item_tower.output_dim, config.output_dim)
+        self.history_item_embedding = (
+            nn.Embedding(num_embeddings=max(config.history_item_vocab_size, 2), embedding_dim=config.history_embedding_dim, padding_idx=0)
+            if config.history_item_vocab_size > 0
+            else None
+        )
+        self.item_id_embedding = (
+            nn.Embedding(num_embeddings=max(config.item_id_vocab_size, 2), embedding_dim=config.item_id_embedding_dim, padding_idx=0)
+            if config.item_id_vocab_size > 0
+            else None
+        )
+        user_projection_input_dim = self.user_tower.output_dim + (
+            config.history_embedding_dim if self.history_item_embedding is not None else 0
+        )
+        self.user_projection = nn.Linear(user_projection_input_dim, config.output_dim)
+        item_projection_input_dim = self.item_tower.output_dim + (
+            config.item_id_embedding_dim if self.item_id_embedding is not None else 0
+        )
+        self.item_projection = nn.Linear(item_projection_input_dim, config.output_dim)
 
+        if self.history_item_embedding is not None:
+            nn.init.xavier_uniform_(self.history_item_embedding.weight)
+            with torch.no_grad():
+                self.history_item_embedding.weight[0].zero_()
+        if self.item_id_embedding is not None:
+            nn.init.xavier_uniform_(self.item_id_embedding.weight)
+            with torch.no_grad():
+                self.item_id_embedding.weight[0].zero_()
         nn.init.xavier_uniform_(self.user_projection.weight)
         nn.init.zeros_(self.user_projection.bias)
         nn.init.xavier_uniform_(self.item_projection.weight)
         nn.init.zeros_(self.item_projection.bias)
 
-    def encode_user(self, user_categorical: Tensor, user_numeric: Tensor | None = None) -> Tensor:
+    def _pool_history_embedding(self, history_item_ids: Tensor, history_mask: Tensor | None = None) -> Tensor:
+        if self.history_item_embedding is None:
+            raise ValueError("history_item_embedding is not configured for this model.")
+        history_embeddings = self.history_item_embedding(history_item_ids)
+        if history_mask is None:
+            history_mask = history_item_ids.ne(0).float()
+        history_mask = history_mask.float().unsqueeze(-1)
+        summed = (history_embeddings * history_mask).sum(dim=1)
+        denominator = history_mask.sum(dim=1).clamp_min(1.0)
+        return summed / denominator
+
+    def encode_user(
+        self,
+        user_categorical: Tensor,
+        user_numeric: Tensor | None = None,
+        history_item_ids: Tensor | None = None,
+        history_mask: Tensor | None = None,
+    ) -> Tensor:
         """Project user-side features into the retrieval embedding space."""
 
         user_hidden = self.user_tower(user_categorical, user_numeric)
+        if self.history_item_embedding is not None:
+            if history_item_ids is None:
+                history_embedding = torch.zeros(
+                    (user_hidden.shape[0], self.config.history_embedding_dim),
+                    dtype=user_hidden.dtype,
+                    device=user_hidden.device,
+                )
+            else:
+                history_embedding = self._pool_history_embedding(history_item_ids, history_mask)
+            user_hidden = torch.cat([user_hidden, history_embedding], dim=-1)
         user_embedding = self.user_projection(user_hidden)
         if self.config.l2_normalize:
             user_embedding = F.normalize(user_embedding, dim=-1)
         return user_embedding
 
-    def encode_item(self, item_categorical: Tensor, item_numeric: Tensor | None = None) -> Tensor:
+    def encode_item(
+        self,
+        item_categorical: Tensor,
+        item_numeric: Tensor | None = None,
+        item_id_index: Tensor | None = None,
+    ) -> Tensor:
         """Project item-side features into the retrieval embedding space."""
 
         item_hidden = self.item_tower(item_categorical, item_numeric)
+        if self.item_id_embedding is not None:
+            if item_id_index is None:
+                item_identity = torch.zeros(
+                    (item_hidden.shape[0], self.config.item_id_embedding_dim),
+                    dtype=item_hidden.dtype,
+                    device=item_hidden.device,
+                )
+            else:
+                item_identity = self.item_id_embedding(item_id_index)
+            item_hidden = torch.cat([item_hidden, item_identity], dim=-1)
         item_embedding = self.item_projection(item_hidden)
         if self.config.l2_normalize:
             item_embedding = F.normalize(item_embedding, dim=-1)
@@ -158,14 +229,26 @@ class TwoTowerModel(_BaseModule):
         item_categorical: Tensor,
         user_numeric: Tensor | None = None,
         item_numeric: Tensor | None = None,
+        history_item_ids: Tensor | None = None,
+        history_mask: Tensor | None = None,
+        item_id_index: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Encode one batch of positive pairs and return similarity outputs."""
 
-        user_embedding = self.encode_user(user_categorical=user_categorical, user_numeric=user_numeric)
-        item_embedding = self.encode_item(item_categorical=item_categorical, item_numeric=item_numeric)
+        user_embedding = self.encode_user(
+            user_categorical=user_categorical,
+            user_numeric=user_numeric,
+            history_item_ids=history_item_ids,
+            history_mask=history_mask,
+        )
+        item_embedding = self.encode_item(
+            item_categorical=item_categorical,
+            item_numeric=item_numeric,
+            item_id_index=item_id_index,
+        )
 
-        logits = torch.matmul(user_embedding, item_embedding.transpose(0, 1))
-        positive_scores = (user_embedding * item_embedding).sum(dim=-1)
+        logits = torch.matmul(user_embedding, item_embedding.transpose(0, 1)) * self.config.logit_scale
+        positive_scores = (user_embedding * item_embedding).sum(dim=-1) * self.config.logit_scale
         return {
             "user_embedding": user_embedding,
             "item_embedding": item_embedding,
@@ -180,6 +263,8 @@ def build_two_tower_config_from_metadata(metadata: dict[str, Any]) -> TwoTowerCo
     encoder_metadata = metadata.get("encoder", {})
     user_vocabularies = encoder_metadata.get("user_vocabularies", {})
     item_vocabularies = encoder_metadata.get("item_vocabularies", {})
+    item_id_vocabulary = encoder_metadata.get("item_id_vocabulary") or {}
+    history_vocabulary = encoder_metadata.get("history_item_vocabulary") or {}
     schema = encoder_metadata.get("schema", {})
 
     user_cardinalities = [
@@ -200,4 +285,6 @@ def build_two_tower_config_from_metadata(metadata: dict[str, Any]) -> TwoTowerCo
             categorical_cardinalities=item_cardinalities,
             numeric_dim=len(schema.get("item_numeric_columns", [])),
         ),
+        item_id_vocab_size=len(item_id_vocabulary.get("index_to_token", [])),
+        history_item_vocab_size=len(history_vocabulary.get("index_to_token", [])),
     )

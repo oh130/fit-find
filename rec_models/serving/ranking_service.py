@@ -35,6 +35,8 @@ CUSTOMER_FEATURES_PATH = BASE_DIR / "data" / "processed" / "customer_features.cs
 LEAKAGE_COLUMNS = {"label", "customer_id", "article_id", "price", "sales_channel_id"}
 DEFAULT_NUMERIC_VALUE = np.nan
 DEFAULT_CATEGORICAL_VALUE = "UNKNOWN"
+DEFAULT_REASON_VALUE = "unknown_candidate_reason"
+DEFAULT_CANDIDATE_PRIOR_WEIGHT = 0.15
 
 
 def cast_numeric_features_to_float(frame: pd.DataFrame) -> pd.DataFrame:
@@ -105,36 +107,88 @@ def _resolve_user_features(user_id: str) -> dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=1)
-def get_ranking_feature_columns() -> tuple[str, ...]:
-    """Cache serving-time ranking feature columns derived from model metadata."""
+def _normalize_session_interest(session_interest: Any) -> dict[str, float]:
+    if not isinstance(session_interest, dict):
+        return {}
+    normalized: dict[str, float] = {}
+    for raw_key, raw_value in session_interest.items():
+        key = _safe_get_text(raw_key)
+        try:
+            normalized[key] = float(raw_value)
+        except (TypeError, ValueError):
+            normalized[key] = 0.0
+    return normalized
 
-    _, metadata = load_ranking_pipeline()
-    feature_columns = tuple(column for column in metadata.get("feature_columns", []) if column not in LEAKAGE_COLUMNS)
-    if not feature_columns:
-        raise ValueError("Ranking metadata does not contain usable feature_columns.")
-    return feature_columns
+
+def _normalized_candidate_prior(candidate_items: pd.DataFrame) -> pd.Series:
+    """Scale retrieval-stage candidate scores so ranking can keep useful recall signals."""
+
+    prior = pd.to_numeric(
+        candidate_items.get("candidate_score", pd.Series(0.0, index=candidate_items.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    if prior.empty:
+        return prior
+
+    minimum = float(prior.min())
+    maximum = float(prior.max())
+    if maximum <= minimum:
+        return pd.Series(0.0, index=candidate_items.index, dtype="float64")
+    return (prior - minimum) / (maximum - minimum)
 
 
-def build_ranking_features(
-    user_id: str,
+def _blend_ranking_scores(scores: np.ndarray, candidate_items: pd.DataFrame) -> np.ndarray:
+    """Blend model probability with retrieval prior for better top-k ordering."""
+
+    prior = _normalized_candidate_prior(candidate_items).to_numpy(dtype=float)
+    if prior.size == 0:
+        return scores
+    return scores + (prior * DEFAULT_CANDIDATE_PRIOR_WEIGHT)
+
+
+def _build_session_signal_features(
     candidate_items: pd.DataFrame,
+    session_context: dict[str, Any] | None,
+) -> pd.DataFrame:
+    session_context = session_context or {"recent_clicks": [], "session_interest": None}
+    normalized_interest = _normalize_session_interest(session_context.get("session_interest"))
+
+    features = pd.DataFrame(index=candidate_items.index)
+    recent_click_signal = candidate_items.get("matches_recent_click_signal", pd.Series(False, index=candidate_items.index))
+    session_interest_signal = candidate_items.get("matches_session_interest", pd.Series(False, index=candidate_items.index))
+    candidate_reason = candidate_items.get("candidate_reason", pd.Series(DEFAULT_REASON_VALUE, index=candidate_items.index))
+
+    categories = candidate_items.get("category", pd.Series(DEFAULT_CATEGORICAL_VALUE, index=candidate_items.index)).map(_safe_get_text)
+    main_categories = candidate_items.get("main_category", pd.Series(DEFAULT_CATEGORICAL_VALUE, index=candidate_items.index)).map(_safe_get_text)
+
+    session_interest_score = []
+    for category, main_category in zip(categories.tolist(), main_categories.tolist(), strict=False):
+        session_interest_score.append(
+            float(normalized_interest.get(category, 0.0)) + float(normalized_interest.get(main_category, 0.0))
+        )
+
+    features["has_recent_click_signal"] = recent_click_signal.fillna(False).astype(int)
+    features["has_session_interest_signal"] = session_interest_signal.fillna(False).astype(int)
+    features["recent_click_count"] = int(len(session_context.get("recent_clicks") or []))
+    features["session_interest_count"] = int(len(normalized_interest))
+    features["session_interest_score"] = np.asarray(session_interest_score, dtype=float)
+    features["candidate_reason"] = candidate_reason.fillna(DEFAULT_REASON_VALUE).map(_safe_get_text)
+    return features
+
+
+def _assemble_ranking_features(
+    *,
+    user_features: pd.DataFrame,
+    candidate_items: pd.DataFrame,
+    feature_columns: list[str],
     session_context: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Build serving-time ranking features for candidate items."""
+    safe_candidates = candidate_items.copy()
+    safe_candidates["category"] = safe_candidates.get("category", pd.Series(DEFAULT_CATEGORICAL_VALUE, index=safe_candidates.index)).map(_safe_get_text)
+    safe_candidates["main_category"] = safe_candidates.get("main_category", pd.Series(DEFAULT_CATEGORICAL_VALUE, index=safe_candidates.index)).map(_safe_get_text)
+    safe_candidates["color"] = safe_candidates.get("color", pd.Series(DEFAULT_CATEGORICAL_VALUE, index=safe_candidates.index)).map(_safe_get_text)
 
-    del session_context
-
-    if candidate_items.empty:
-        return pd.DataFrame()
-
-    feature_columns = list(get_ranking_feature_columns())
-    user_features = _resolve_user_features(user_id)
-    age_bucket = _safe_get_text(user_features.get("age_bucket"))
-    club_member_status = _safe_get_text(user_features.get("club_member_status"))
-    fashion_news_frequency = _safe_get_text(user_features.get("fashion_news_frequency"))
-
-    safe_text_frame = candidate_items.reindex(
+    safe_text_frame = safe_candidates.reindex(
         columns=[
             "prod_name",
             "product_type_name",
@@ -153,19 +207,76 @@ def build_ranking_features(
     for column in safe_text_frame.columns:
         safe_text_frame[column] = safe_text_frame[column].map(_safe_get_text)
 
-    features = pd.DataFrame(index=candidate_items.index)
-    features["age"] = user_features.get("age", DEFAULT_NUMERIC_VALUE)
-    features["age_bucket"] = age_bucket
-    features["fashion_news_frequency"] = fashion_news_frequency
-    features["club_member_status"] = club_member_status
+    features = pd.DataFrame(index=safe_candidates.index)
+    features["age"] = pd.to_numeric(user_features.get("age"), errors="coerce")
+    features["age_bucket"] = user_features["age_bucket"].map(_safe_get_text)
+    features["fashion_news_frequency"] = user_features["fashion_news_frequency"].map(_safe_get_text)
+    features["club_member_status"] = user_features["club_member_status"].map(_safe_get_text)
+
+    features["popularity"] = pd.to_numeric(safe_candidates.get("popularity"), errors="coerce")
+    features["avg_price"] = pd.to_numeric(safe_candidates.get("avg_price"), errors="coerce")
+    features["item_age_days"] = pd.to_numeric(safe_candidates.get("item_age_days"), errors="coerce")
+    features["is_new_item"] = (
+        safe_candidates.get("is_new_item", pd.Series(False, index=safe_candidates.index))
+        .fillna(False)
+        .astype(int)
+    )
     for column in safe_text_frame.columns:
         features[column] = safe_text_frame[column]
 
-    features["age_category"] = age_bucket + "_" + features["category"]
-    features["age_color"] = age_bucket + "_" + features["color"]
-    features["member_category"] = club_member_status + "_" + features["category"]
-    features["fashion_category"] = fashion_news_frequency + "_" + features["category"]
+    features["age_category"] = features["age_bucket"] + "_" + features["category"]
+    features["age_color"] = features["age_bucket"] + "_" + features["color"]
+    features["member_category"] = features["club_member_status"] + "_" + features["category"]
+    features["fashion_category"] = features["fashion_news_frequency"] + "_" + features["category"]
+
+    session_signal_features = _build_session_signal_features(
+        candidate_items=safe_candidates,
+        session_context=session_context,
+    )
+    for column in session_signal_features.columns:
+        features[column] = session_signal_features[column]
+
     return prepare_inference_features(features, feature_columns=feature_columns)
+
+
+@lru_cache(maxsize=1)
+def get_ranking_feature_columns() -> tuple[str, ...]:
+    """Cache serving-time ranking feature columns derived from model metadata."""
+
+    _, metadata = load_ranking_pipeline()
+    feature_columns = tuple(column for column in metadata.get("feature_columns", []) if column not in LEAKAGE_COLUMNS)
+    if not feature_columns:
+        raise ValueError("Ranking metadata does not contain usable feature_columns.")
+    return feature_columns
+
+
+def build_ranking_features(
+    user_id: str,
+    candidate_items: pd.DataFrame,
+    session_context: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Build serving-time ranking features for candidate items."""
+
+    if candidate_items.empty:
+        return pd.DataFrame()
+
+    feature_columns = list(get_ranking_feature_columns())
+    user_features = _resolve_user_features(user_id)
+    age_bucket = _safe_get_text(user_features.get("age_bucket"))
+    club_member_status = _safe_get_text(user_features.get("club_member_status"))
+    fashion_news_frequency = _safe_get_text(user_features.get("fashion_news_frequency"))
+
+    user_feature_frame = pd.DataFrame(index=candidate_items.index)
+    user_feature_frame["age"] = user_features.get("age", DEFAULT_NUMERIC_VALUE)
+    user_feature_frame["age_bucket"] = age_bucket
+    user_feature_frame["fashion_news_frequency"] = fashion_news_frequency
+    user_feature_frame["club_member_status"] = club_member_status
+    return _assemble_ranking_features(
+        user_features=user_feature_frame,
+        candidate_items=candidate_items,
+        feature_columns=feature_columns,
+        session_context=session_context,
+    )
 
 
 def build_batch_ranking_features(candidate_items: pd.DataFrame) -> pd.DataFrame:
@@ -205,38 +316,12 @@ def build_batch_ranking_features(candidate_items: pd.DataFrame) -> pd.DataFrame:
         user_features["fashion_news_frequency"] = user_features["fashion_news_frequency"].map(_safe_get_text)
         user_features["club_member_status"] = user_features["club_member_status"].map(_safe_get_text)
 
-    safe_text_frame = safe_candidates.reindex(
-        columns=[
-            "prod_name",
-            "product_type_name",
-            "product_group_name",
-            "colour_group_name",
-            "perceived_colour_master_name",
-            "department_name",
-            "section_name",
-            "garment_group_name",
-            "category",
-            "main_category",
-            "color",
-        ],
-        fill_value=DEFAULT_CATEGORICAL_VALUE,
-    ).copy()
-    for column in safe_text_frame.columns:
-        safe_text_frame[column] = safe_text_frame[column].map(_safe_get_text)
-
-    features = pd.DataFrame(index=safe_candidates.index)
-    features["age"] = user_features["age"]
-    features["age_bucket"] = user_features["age_bucket"]
-    features["fashion_news_frequency"] = user_features["fashion_news_frequency"]
-    features["club_member_status"] = user_features["club_member_status"]
-    for column in safe_text_frame.columns:
-        features[column] = safe_text_frame[column]
-
-    features["age_category"] = features["age_bucket"] + "_" + features["category"]
-    features["age_color"] = features["age_bucket"] + "_" + features["color"]
-    features["member_category"] = features["club_member_status"] + "_" + features["category"]
-    features["fashion_category"] = features["fashion_news_frequency"] + "_" + features["category"]
-    return prepare_inference_features(features, feature_columns=feature_columns)
+    return _assemble_ranking_features(
+        user_features=user_features,
+        candidate_items=safe_candidates,
+        feature_columns=feature_columns,
+        session_context=None,
+    )
 
 
 def score_candidates(
@@ -256,7 +341,10 @@ def score_candidates(
         candidate_items=candidate_items,
         session_context=session_context,
     )
-    scores = _extract_scores(model=model, features=ranking_features)
+    scores = _blend_ranking_scores(
+        scores=_extract_scores(model=model, features=ranking_features),
+        candidate_items=candidate_items,
+    )
 
     result = candidate_items.copy()
     result["score"] = scores
@@ -283,7 +371,10 @@ def score_candidate_batch(
 
     model, _ = load_ranking_pipeline(checkpoint_dir=checkpoint_dir)
     ranking_features = build_batch_ranking_features(candidate_items=candidate_items)
-    scores = _extract_scores(model=model, features=ranking_features)
+    scores = _blend_ranking_scores(
+        scores=_extract_scores(model=model, features=ranking_features),
+        candidate_items=candidate_items,
+    )
 
     result = candidate_items.copy()
     result["score"] = scores
