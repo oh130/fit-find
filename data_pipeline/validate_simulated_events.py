@@ -12,12 +12,17 @@ from typing import Sequence
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
     "test": {
         "INPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_test.csv",
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_validation_test.json",
+    },
+    "dev": {
+        "INPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_dev.csv",
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_validation_dev.json",
     },
     "production": {
         "INPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events.csv",

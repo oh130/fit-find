@@ -20,6 +20,14 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 
 DEFAULT_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "processed" / "train_data_dev.csv"
+LATENCY_EVALUATION_COLUMNS = [
+    "customer_id",
+    "article_id",
+    "label",
+    "sales_channel_id",
+    "recent_clicks",
+    "session_interest",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,7 +59,7 @@ def _summary(values: list[float]) -> dict[str, float]:
 
 
 def measure_latency(data_path: Path, top_k: int, max_users: int) -> dict[str, Any]:
-    data = enrich_candidate_rows(load_evaluation_data(data_path))
+    data = enrich_candidate_rows(load_evaluation_data(data_path, columns=LATENCY_EVALUATION_COLUMNS))
     context = build_evaluation_context(data, max_users=max_users)
 
     warmup_start = time.perf_counter()

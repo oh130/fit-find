@@ -8,12 +8,17 @@ from typing import Dict, Sequence
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
     "test": {
         "INPUT_FILE": BASE_DIR / "data" / "processed" / "item_master_test.csv",
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "item_persona_scores_test.csv",
+    },
+    "dev": {
+        "INPUT_FILE": BASE_DIR / "data" / "processed" / "item_master_dev.csv",
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "item_persona_scores_dev.csv",
     },
     "production": {
         "INPUT_FILE": BASE_DIR / "data" / "processed" / "item_master.csv",

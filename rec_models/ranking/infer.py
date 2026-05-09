@@ -20,8 +20,10 @@ except ImportError:  # pragma: no cover - deepfm inference requires torch
 
 try:
     from rec_models.ranking.model import DeepFMRanker, deepfm_config_from_metadata
+    from rec_models.ranking.train import enrich_with_persona_features
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
     from ranking.model import DeepFMRanker, deepfm_config_from_metadata  # type: ignore[no-redef]
+    from ranking.train import enrich_with_persona_features  # type: ignore[no-redef]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -140,21 +142,22 @@ def score_candidates(
     checkpoint_dir: Path = DEFAULT_CHECKPOINT_DIR,
     model_type: str = "logreg",
 ) -> pd.DataFrame:
+    enriched_candidates = enrich_with_persona_features(candidates)
     if model_type == "deepfm":
         model, metadata = load_deepfm_artifacts(checkpoint_dir)
         feature_columns = metadata.get("feature_columns", [])
         identifier_columns = metadata.get("identifier_columns", [])
-        features = prepare_inference_features(candidates, feature_columns)
+        features = prepare_inference_features(enriched_candidates, feature_columns)
         scores = _extract_deepfm_scores(model, features, metadata)
     else:
         model, metadata = load_artifacts(checkpoint_dir)
         feature_columns = metadata.get("feature_columns", [])
         identifier_columns = metadata.get("identifier_columns", [])
-        features = prepare_inference_features(candidates, feature_columns)
+        features = prepare_inference_features(enriched_candidates, feature_columns)
         scores = _extract_scores(model, features)
 
-    preserved_columns = [column for column in identifier_columns if column in candidates.columns]
-    result = candidates.loc[:, preserved_columns].copy() if preserved_columns else pd.DataFrame(index=candidates.index)
+    preserved_columns = [column for column in identifier_columns if column in enriched_candidates.columns]
+    result = enriched_candidates.loc[:, preserved_columns].copy() if preserved_columns else pd.DataFrame(index=enriched_candidates.index)
     result["score"] = scores
     return result
 

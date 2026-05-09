@@ -21,7 +21,7 @@ try:
         load_deepfm_artifacts,
         prepare_inference_features,
     )
-    from rec_models.ranking.train import enrich_with_item_features
+    from rec_models.ranking.train import enrich_with_item_features, enrich_with_persona_features
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
     from common.metrics import hit_rate_at_k, mean_metric, ndcg_at_k, safe_roc_auc_score  # type: ignore[no-redef]
     from common.utils import build_experiment_report, write_json_report  # type: ignore[no-redef]
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
         load_deepfm_artifacts,
         prepare_inference_features,
     )
-    from ranking.train import enrich_with_item_features  # type: ignore[no-redef]
+    from ranking.train import enrich_with_item_features, enrich_with_persona_features  # type: ignore[no-redef]
 
 
 DEFAULT_TOP_K = 50
@@ -78,7 +78,7 @@ def evaluate_ranking_model(
     if not feature_columns:
         raise ValueError("Ranking metadata does not contain feature_columns.")
 
-    enriched_data = enrich_with_item_features(data)
+    enriched_data = enrich_with_persona_features(enrich_with_item_features(data))
     features = prepare_inference_features(enriched_data, feature_columns=feature_columns)
     scores = (
         _extract_deepfm_scores(model=model, features=features, metadata=metadata)

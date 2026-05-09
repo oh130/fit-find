@@ -14,6 +14,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TRANSACTIONS_FILE = BASE_DIR / "data" / "raw" / "transactions_train.csv"
 CUSTOMER_FEATURES_FILE = BASE_DIR / "data" / "processed" / "customer_features.csv"
 ARTICLE_FEATURES_FILE = BASE_DIR / "data" / "processed" / "articles_feature.csv"
+USER_PERSONA_FILE = BASE_DIR / "data" / "processed" / "user_persona_scores.csv"
+ITEM_PERSONA_FILE = BASE_DIR / "data" / "processed" / "item_persona_scores.csv"
 
 # MODE = "production"
 # MODE = "dev"
@@ -24,6 +26,8 @@ MODE_CONFIG = {
         "MAX_TRANSACTION_ROWS": 10_000,
         "NEGATIVE_RATIO": 1,
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "train_data_test.csv",
+        "USER_PERSONA_FILE": BASE_DIR / "data" / "processed" / "user_persona_scores_test.csv",
+        "ITEM_PERSONA_FILE": BASE_DIR / "data" / "processed" / "item_persona_scores_test.csv",
         "RANDOM_SEED": 42,
         "LOG_EVERY_N_ROWS": 2_000,
         "PARTITION_COUNT": 16,
@@ -32,6 +36,8 @@ MODE_CONFIG = {
         "MAX_TRANSACTION_ROWS": 1_000_000,
         "NEGATIVE_RATIO": 1,
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "train_data_dev.csv",
+        "USER_PERSONA_FILE": BASE_DIR / "data" / "processed" / "user_persona_scores_dev.csv",
+        "ITEM_PERSONA_FILE": BASE_DIR / "data" / "processed" / "item_persona_scores_dev.csv",
         "RANDOM_SEED": 42,
         "LOG_EVERY_N_ROWS": 100_000,
         "PARTITION_COUNT": 64,
@@ -40,6 +46,8 @@ MODE_CONFIG = {
         "MAX_TRANSACTION_ROWS": None,
         "NEGATIVE_RATIO": 1,
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "train_data_production.csv",
+        "USER_PERSONA_FILE": USER_PERSONA_FILE,
+        "ITEM_PERSONA_FILE": ITEM_PERSONA_FILE,
         "RANDOM_SEED": 42,
         "LOG_EVERY_N_ROWS": 100_000,
         "PARTITION_COUNT": 256,
@@ -55,9 +63,28 @@ CONFIG = MODE_CONFIG[RUNTIME_MODE]
 MAX_TRANSACTION_ROWS: Optional[int] = CONFIG["MAX_TRANSACTION_ROWS"]
 NEGATIVE_RATIO: int = CONFIG["NEGATIVE_RATIO"]
 OUTPUT_FILE: Path = CONFIG["OUTPUT_FILE"]
+CONFIG_USER_PERSONA_FILE: Path = CONFIG["USER_PERSONA_FILE"]
+CONFIG_ITEM_PERSONA_FILE: Path = CONFIG["ITEM_PERSONA_FILE"]
 RANDOM_SEED: int = CONFIG["RANDOM_SEED"]
 LOG_EVERY_N_ROWS: int = CONFIG["LOG_EVERY_N_ROWS"]
 PARTITION_COUNT: int = CONFIG["PARTITION_COUNT"]
+
+PERSONAS = [
+    "trendsetter",
+    "practical",
+    "value",
+    "brand_loyal",
+    "impulse",
+    "careful",
+    "repeat_stable",
+    "color_focus",
+    "category_focus",
+]
+
+PERSONA_RATIO_COLUMNS = [f"{persona}_ratio" for persona in PERSONAS]
+PERSONA_REQUIRED_COLUMNS = PERSONA_RATIO_COLUMNS + ["top_persona", "top_persona_ratio"]
+USER_PERSONA_OUTPUT_COLUMNS = [f"user_{column}" for column in PERSONA_RATIO_COLUMNS]
+ITEM_PERSONA_OUTPUT_COLUMNS = [f"item_{column}" for column in PERSONA_RATIO_COLUMNS]
 
 OUTPUT_COLUMNS = [
     "customer_id",
@@ -94,6 +121,14 @@ OUTPUT_COLUMNS = [
     "recent_3_unique_category_count",
     "days_since_last_same_category_purchase",
     "recent_5_purchase_main_category_count",
+    *USER_PERSONA_OUTPUT_COLUMNS,
+    "user_top_persona",
+    "user_top_persona_ratio",
+    *ITEM_PERSONA_OUTPUT_COLUMNS,
+    "item_top_persona",
+    "item_top_persona_ratio",
+    "top_persona_match",
+    "persona_match_score",
 ]
 
 CUSTOMER_FEATURE_COLUMNS = [
@@ -129,6 +164,7 @@ TRANSACTION_REQUIRED_COLUMNS = PARTITION_COLUMNS
 StatsDict = Dict[str, int]
 CustomerFeature = Dict[str, str]
 ArticleFeature = Dict[str, str]
+PersonaFeature = Dict[str, str]
 
 
 def configure_logging() -> None:
@@ -151,6 +187,16 @@ def resolve_required_file(file_path: Path, description: str) -> Path:
     if file_path.exists():
         return file_path
     raise FileNotFoundError(f"Missing {description}: {file_path}")
+
+
+def resolve_optional_file(file_path: Path, fallback_file: Path, description: str) -> Optional[Path]:
+    if file_path.exists():
+        return file_path
+    if fallback_file.exists():
+        logging.warning("Missing %s for mode=%s, using fallback: %s", description, RUNTIME_MODE, fallback_file)
+        return fallback_file
+    logging.warning("Missing %s: %s", description, file_path)
+    return None
 
 
 def validate_required_columns(
@@ -200,6 +246,71 @@ def load_article_features(file_path: Path) -> Dict[str, ArticleFeature]:
                 for column in ARTICLE_FEATURE_COLUMNS
             }
     return article_features
+
+
+def load_persona_features(file_path: Optional[Path], key_column: str) -> Dict[str, PersonaFeature]:
+    if file_path is None:
+        return {}
+
+    persona_features: Dict[str, PersonaFeature] = {}
+    with file_path.open(newline="", encoding="utf-8") as infile:
+        reader = csv.DictReader(infile)
+        for row in reader:
+            record_id = row[key_column].strip()
+            if not record_id:
+                continue
+            persona_features[record_id] = {
+                column: row[column].strip()
+                for column in PERSONA_REQUIRED_COLUMNS
+            }
+    return persona_features
+
+
+def default_persona_feature() -> PersonaFeature:
+    feature = {column: "0.000000" for column in PERSONA_RATIO_COLUMNS}
+    feature["top_persona"] = "UNKNOWN"
+    feature["top_persona_ratio"] = "0.000000"
+    return feature
+
+
+def parse_ratio(raw_value: str) -> float:
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_persona_features(
+    customer_id: str,
+    article_id: str,
+    user_personas: Dict[str, PersonaFeature],
+    item_personas: Dict[str, PersonaFeature],
+) -> Dict[str, str]:
+    user_persona = user_personas.get(customer_id) or default_persona_feature()
+    item_persona = item_personas.get(article_id) or default_persona_feature()
+    persona_match_score = sum(
+        parse_ratio(user_persona[f"{persona}_ratio"]) * parse_ratio(item_persona[f"{persona}_ratio"])
+        for persona in PERSONAS
+    )
+    user_top_persona = user_persona["top_persona"]
+    item_top_persona = item_persona["top_persona"]
+
+    return {
+        **{
+            f"user_{column}": user_persona[column]
+            for column in PERSONA_RATIO_COLUMNS
+        },
+        "user_top_persona": user_top_persona,
+        "user_top_persona_ratio": user_persona["top_persona_ratio"],
+        **{
+            f"item_{column}": item_persona[column]
+            for column in PERSONA_RATIO_COLUMNS
+        },
+        "item_top_persona": item_top_persona,
+        "item_top_persona_ratio": item_persona["top_persona_ratio"],
+        "top_persona_match": "1" if user_top_persona != "UNKNOWN" and user_top_persona == item_top_persona else "0",
+        "persona_match_score": f"{persona_match_score:.6f}",
+    }
 
 
 def stable_partition_index(customer_id: str, partition_count: int) -> int:
@@ -357,6 +468,7 @@ def make_output_row(
     customer_feature: CustomerFeature,
     article_feature: ArticleFeature,
     history_features: Dict[str, str],
+    persona_features: Dict[str, str],
 ) -> Dict[str, str]:
     age_bucket = customer_feature["age_bucket"]
     club_member_status = customer_feature["club_member_status"]
@@ -390,6 +502,7 @@ def make_output_row(
         "member_category": f"{club_member_status}_{category}",
         "fashion_category": f"{fashion_news_frequency}_{category}",
         **history_features,
+        **persona_features,
     }
 
 
@@ -504,6 +617,8 @@ def write_partition_rows(
     partition_path: Path,
     customer_features: Dict[str, CustomerFeature],
     article_features: Dict[str, ArticleFeature],
+    user_personas: Dict[str, PersonaFeature],
+    item_personas: Dict[str, PersonaFeature],
     article_ids: Sequence[str],
     rng: random.Random,
 ) -> StatsDict:
@@ -542,6 +657,12 @@ def write_partition_rows(
                 history_dates=history_dates,
                 article_features=article_features,
             )
+            persona_features = build_persona_features(
+                customer_id=customer_id,
+                article_id=article_id,
+                user_personas=user_personas,
+                item_personas=item_personas,
+            )
             writer.writerow(
                 make_output_row(
                     customer_id=customer_id,
@@ -552,6 +673,7 @@ def write_partition_rows(
                     customer_feature=customer_feature,
                     article_feature=article_feature,
                     history_features=history_features,
+                    persona_features=persona_features,
                 )
             )
             stats["positives_written"] += 1
@@ -577,6 +699,12 @@ def write_partition_rows(
                 continue
             context_index = min(negative_index // max(NEGATIVE_RATIO, 1), max(len(positive_contexts) - 1, 0))
             _, history_features = positive_contexts[context_index]
+            persona_features = build_persona_features(
+                customer_id=customer_id,
+                article_id=article_id,
+                user_personas=user_personas,
+                item_personas=item_personas,
+            )
             writer.writerow(
                 make_output_row(
                     customer_id=customer_id,
@@ -587,6 +715,7 @@ def write_partition_rows(
                     customer_feature=customer_feature,
                     article_feature=article_feature,
                     history_features=history_features,
+                    persona_features=persona_features,
                 )
             )
             stats["negatives_written"] += 1
@@ -602,6 +731,8 @@ def write_partition_rows(
 def build_train_dataset(
     customer_features: Dict[str, CustomerFeature],
     article_features: Dict[str, ArticleFeature],
+    user_personas: Dict[str, PersonaFeature],
+    item_personas: Dict[str, PersonaFeature],
     article_ids: Sequence[str],
 ) -> StatsDict:
     rng = random.Random(RANDOM_SEED)
@@ -642,6 +773,8 @@ def build_train_dataset(
                     partition_path=partition_path,
                     customer_features=customer_features,
                     article_features=article_features,
+                    user_personas=user_personas,
+                    item_personas=item_personas,
                     article_ids=article_ids,
                     rng=rng,
                 )
@@ -658,15 +791,23 @@ def main() -> None:
     transactions_path = resolve_required_file(TRANSACTIONS_FILE, "transactions raw file")
     customer_path = resolve_required_file(CUSTOMER_FEATURES_FILE, "customer feature file")
     article_path = resolve_required_file(ARTICLE_FEATURES_FILE, "article feature file")
+    user_persona_path = resolve_optional_file(CONFIG_USER_PERSONA_FILE, USER_PERSONA_FILE, "user persona score file")
+    item_persona_path = resolve_optional_file(CONFIG_ITEM_PERSONA_FILE, ITEM_PERSONA_FILE, "item persona score file")
     validate_required_columns(transactions_path, TRANSACTION_REQUIRED_COLUMNS, "customer_id")
     validate_required_columns(customer_path, CUSTOMER_FEATURE_COLUMNS, "customer_id")
     validate_required_columns(article_path, ARTICLE_FEATURE_COLUMNS, "article_id")
+    if user_persona_path is not None:
+        validate_required_columns(user_persona_path, PERSONA_REQUIRED_COLUMNS, "customer_id")
+    if item_persona_path is not None:
+        validate_required_columns(item_persona_path, PERSONA_REQUIRED_COLUMNS, "article_id")
     logging.info(
-        "mode=%s transactions_file=%s customer_features_file=%s article_features_file=%s output_file=%s max_transaction_rows=%s negative_ratio=%s partition_count=%s random_seed=%s",
+        "mode=%s transactions_file=%s customer_features_file=%s article_features_file=%s user_persona_file=%s item_persona_file=%s output_file=%s max_transaction_rows=%s negative_ratio=%s partition_count=%s random_seed=%s",
         RUNTIME_MODE,
         transactions_path,
         customer_path,
         article_path,
+        user_persona_path,
+        item_persona_path,
         OUTPUT_FILE,
         MAX_TRANSACTION_ROWS,
         NEGATIVE_RATIO,
@@ -683,9 +824,19 @@ def main() -> None:
     article_ids = tuple(article_features.keys())
     log_stage("load_article_features", article_start, article_count=len(article_features))
 
+    user_persona_start = time.perf_counter()
+    user_personas = load_persona_features(user_persona_path, "customer_id")
+    log_stage("load_user_persona_features", user_persona_start, user_persona_count=len(user_personas))
+
+    item_persona_start = time.perf_counter()
+    item_personas = load_persona_features(item_persona_path, "article_id")
+    log_stage("load_item_persona_features", item_persona_start, item_persona_count=len(item_personas))
+
     totals = build_train_dataset(
         customer_features=customer_features,
         article_features=article_features,
+        user_personas=user_personas,
+        item_personas=item_personas,
         article_ids=article_ids,
     )
 

@@ -29,7 +29,7 @@ try:
         load_deepfm_artifacts,
         prepare_inference_features,
     )
-    from rec_models.ranking.train import enrich_with_item_features
+    from rec_models.ranking.train import enrich_with_item_features, enrich_with_persona_features
     from rec_models.serving import candidate_service as serving_candidate_service
     from rec_models.serving.candidate_service import CandidateUserProfileStore
     from rec_models.serving.candidate_service import (
@@ -56,7 +56,7 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
         load_deepfm_artifacts,
         prepare_inference_features,
     )
-    from ranking.train import enrich_with_item_features  # type: ignore[no-redef]
+    from ranking.train import enrich_with_item_features, enrich_with_persona_features  # type: ignore[no-redef]
     import serving.candidate_service as serving_candidate_service  # type: ignore[no-redef]
     from serving.candidate_service import CandidateUserProfileStore  # type: ignore[no-redef]
     from serving.candidate_service import (  # type: ignore[no-redef]
@@ -804,7 +804,7 @@ def run_ranking_diagnostic(args: argparse.Namespace) -> None:
     data = load_evaluation_data(args.data)
     context = build_evaluation_context(data, max_users=args.max_users)
     catalog_segments = _load_catalog_segments()
-    enriched = enrich_with_item_features(data).copy()
+    enriched = enrich_with_persona_features(enrich_with_item_features(data)).copy()
     enriched["customer_id"] = enriched["customer_id"].astype(str)
     enriched["article_id"] = enriched["article_id"].astype(str)
     enriched = enriched.loc[enriched["customer_id"].isin(set(context.sampled_user_ids))].copy()

@@ -12,6 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / "simulator" / "persona_config_9.yaml"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -19,6 +20,12 @@ MODE_CONFIG = {
         "USER_PERSONA_FILE": BASE_DIR / "data" / "processed" / "user_persona_scores_test.csv",
         "CUSTOMER_PROFILE_FILE": BASE_DIR / "data" / "processed" / "customer_purchase_profile_test.csv",
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "sim_users_test.csv",
+        "RANDOM_SEED": 42,
+    },
+    "dev": {
+        "USER_PERSONA_FILE": BASE_DIR / "data" / "processed" / "user_persona_scores_dev.csv",
+        "CUSTOMER_PROFILE_FILE": BASE_DIR / "data" / "processed" / "customer_purchase_profile_dev.csv",
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "sim_users_dev.csv",
         "RANDOM_SEED": 42,
     },
     "production": {

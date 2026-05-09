@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,12 @@ DEFAULT_TRAINING_DATA_PATH = BASE_DIR / "data" / "processed" / "train_data_dev.c
 ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "item_features.csv"
 ITEM_FEATURES_DEV_PATH = BASE_DIR / "data" / "processed" / "item_features_dev.csv"
 ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "item_features_test.csv"
+USER_PERSONA_PATH = BASE_DIR / "data" / "processed" / "user_persona_scores.csv"
+USER_PERSONA_DEV_PATH = BASE_DIR / "data" / "processed" / "user_persona_scores_dev.csv"
+USER_PERSONA_TEST_PATH = BASE_DIR / "data" / "processed" / "user_persona_scores_test.csv"
+ITEM_PERSONA_PATH = BASE_DIR / "data" / "processed" / "item_persona_scores.csv"
+ITEM_PERSONA_DEV_PATH = BASE_DIR / "data" / "processed" / "item_persona_scores_dev.csv"
+ITEM_PERSONA_TEST_PATH = BASE_DIR / "data" / "processed" / "item_persona_scores_test.csv"
 PIPELINE_ARTIFACT_NAME = "ranking_baseline.joblib"
 METADATA_ARTIFACT_NAME = "ranking_baseline_metadata.json"
 DEEPFM_ARTIFACT_NAME = "ranking_deepfm.pt"
@@ -60,6 +67,30 @@ DEFAULT_DEEPFM_EPOCHS = 10
 DEFAULT_DEEPFM_LEARNING_RATE = 1e-3
 DEFAULT_DEEPFM_WEIGHT_DECAY = 1e-5
 DEFAULT_LOGREG_MAX_ITER = 3000
+PERSONAS = (
+    "trendsetter",
+    "practical",
+    "value",
+    "brand_loyal",
+    "impulse",
+    "careful",
+    "repeat_stable",
+    "color_focus",
+    "category_focus",
+)
+PERSONA_RATIO_COLUMNS = tuple(f"{persona}_ratio" for persona in PERSONAS)
+USER_PERSONA_FEATURE_COLUMNS = tuple(f"user_{column}" for column in PERSONA_RATIO_COLUMNS)
+ITEM_PERSONA_FEATURE_COLUMNS = tuple(f"item_{column}" for column in PERSONA_RATIO_COLUMNS)
+PERSONA_FEATURE_COLUMNS = (
+    *USER_PERSONA_FEATURE_COLUMNS,
+    "user_top_persona",
+    "user_top_persona_ratio",
+    *ITEM_PERSONA_FEATURE_COLUMNS,
+    "item_top_persona",
+    "item_top_persona_ratio",
+    "top_persona_match",
+    "persona_match_score",
+)
 
 
 @dataclass(slots=True)
@@ -97,11 +128,25 @@ def load_training_data(csv_path: Path) -> pd.DataFrame:
         raise ValueError(f"Training data must include a '{TARGET_COLUMN}' column.")
     if "article_id" in df.columns:
         df["article_id"] = df["article_id"].astype(str).str.strip().str.zfill(10)
-    return enrich_with_item_features(df)
+    return enrich_with_persona_features(enrich_with_item_features(df))
 
 
 def _resolve_item_features_path() -> Path | None:
     for path in (ITEM_FEATURES_DEV_PATH, ITEM_FEATURES_PATH, ITEM_FEATURES_TEST_PATH):
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_user_persona_path() -> Path | None:
+    for path in (USER_PERSONA_DEV_PATH, USER_PERSONA_PATH, USER_PERSONA_TEST_PATH):
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_item_persona_path() -> Path | None:
+    for path in (ITEM_PERSONA_DEV_PATH, ITEM_PERSONA_PATH, ITEM_PERSONA_TEST_PATH):
         if path.exists():
             return path
     return None
@@ -154,6 +199,87 @@ def enrich_with_item_features(df: pd.DataFrame) -> pd.DataFrame:
         enriched["is_new_item"] = normalized
 
     LOGGER.info("Merged ranking item features from %s", item_feature_path)
+    return enriched
+
+
+@lru_cache(maxsize=6)
+def _load_persona_frame(path: Path | None, key_column: str, prefix: str) -> pd.DataFrame:
+    output_columns = [f"{prefix}_{column}" for column in PERSONA_RATIO_COLUMNS] + [
+        f"{prefix}_top_persona",
+        f"{prefix}_top_persona_ratio",
+    ]
+    if path is None:
+        LOGGER.warning("%s persona score file not found. Using default persona features.", prefix.capitalize())
+        return pd.DataFrame(columns=[key_column, *output_columns])
+
+    required_columns = [key_column, *PERSONA_RATIO_COLUMNS, "top_persona", "top_persona_ratio"]
+    persona_frame = pd.read_csv(path, dtype={key_column: str})
+    missing_columns = [column for column in required_columns if column not in persona_frame.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns in {path}: {', '.join(missing_columns)}")
+
+    if key_column == "article_id":
+        persona_frame[key_column] = persona_frame[key_column].astype(str).str.strip().str.zfill(10)
+    else:
+        persona_frame[key_column] = persona_frame[key_column].astype(str).str.strip()
+
+    rename_map = {column: f"{prefix}_{column}" for column in PERSONA_RATIO_COLUMNS}
+    rename_map["top_persona"] = f"{prefix}_top_persona"
+    rename_map["top_persona_ratio"] = f"{prefix}_top_persona_ratio"
+    return persona_frame.loc[:, required_columns].rename(columns=rename_map).drop_duplicates(key_column)
+
+
+def _fill_persona_defaults(df: pd.DataFrame) -> pd.DataFrame:
+    filled = df.copy()
+    for column in USER_PERSONA_FEATURE_COLUMNS + ITEM_PERSONA_FEATURE_COLUMNS:
+        values = filled[column] if column in filled.columns else pd.Series(0.0, index=filled.index)
+        filled[column] = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    for column in ("user_top_persona_ratio", "item_top_persona_ratio", "persona_match_score"):
+        values = filled[column] if column in filled.columns else pd.Series(0.0, index=filled.index)
+        filled[column] = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    for column in ("user_top_persona", "item_top_persona"):
+        values = filled[column] if column in filled.columns else pd.Series("UNKNOWN", index=filled.index)
+        filled[column] = values.fillna("UNKNOWN").astype(str)
+        filled[column] = filled[column].str.strip().replace("", "UNKNOWN")
+    if "top_persona_match" not in filled.columns:
+        filled["top_persona_match"] = 0
+    filled["top_persona_match"] = pd.to_numeric(filled["top_persona_match"], errors="coerce").fillna(0).astype(int)
+    return filled
+
+
+def enrich_with_persona_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach user/item persona ratios and match signals for ranking."""
+
+    if all(column in df.columns for column in PERSONA_FEATURE_COLUMNS):
+        return _fill_persona_defaults(df)
+
+    enriched = df.copy()
+    if "customer_id" not in enriched.columns or "article_id" not in enriched.columns:
+        LOGGER.warning("Persona enrichment requires customer_id and article_id. Using default persona features.")
+        for column in PERSONA_FEATURE_COLUMNS:
+            enriched[column] = "UNKNOWN" if column.endswith("top_persona") else 0.0
+        return _fill_persona_defaults(enriched)
+
+    enriched["customer_id"] = enriched["customer_id"].astype(str).str.strip()
+    enriched["article_id"] = enriched["article_id"].astype(str).str.strip().str.zfill(10)
+    user_personas = _load_persona_frame(_resolve_user_persona_path(), "customer_id", "user")
+    item_personas = _load_persona_frame(_resolve_item_persona_path(), "article_id", "item")
+
+    for column in PERSONA_FEATURE_COLUMNS:
+        if column in enriched.columns:
+            enriched = enriched.drop(columns=column)
+
+    enriched = enriched.merge(user_personas, on="customer_id", how="left")
+    enriched = enriched.merge(item_personas, on="article_id", how="left")
+    enriched = _fill_persona_defaults(enriched)
+    enriched["top_persona_match"] = (
+        enriched["user_top_persona"].ne("UNKNOWN")
+        & enriched["user_top_persona"].eq(enriched["item_top_persona"])
+    ).astype(int)
+    enriched["persona_match_score"] = sum(
+        enriched[f"user_{persona}_ratio"] * enriched[f"item_{persona}_ratio"]
+        for persona in PERSONAS
+    )
     return enriched
 
 

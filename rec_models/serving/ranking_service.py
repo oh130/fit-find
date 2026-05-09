@@ -19,12 +19,38 @@ try:
         load_artifacts,
         prepare_inference_features,
     )
+    from rec_models.ranking.train import (
+        ITEM_PERSONA_DEV_PATH,
+        ITEM_PERSONA_FEATURE_COLUMNS,
+        ITEM_PERSONA_PATH,
+        ITEM_PERSONA_TEST_PATH,
+        PERSONAS,
+        PERSONA_FEATURE_COLUMNS,
+        PERSONA_RATIO_COLUMNS,
+        USER_PERSONA_DEV_PATH,
+        USER_PERSONA_FEATURE_COLUMNS,
+        USER_PERSONA_PATH,
+        USER_PERSONA_TEST_PATH,
+    )
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
     from ranking.infer import (  # type: ignore[no-redef]
         DEFAULT_CHECKPOINT_DIR,
         _extract_scores,
         load_artifacts,
         prepare_inference_features,
+    )
+    from ranking.train import (  # type: ignore[no-redef]
+        ITEM_PERSONA_DEV_PATH,
+        ITEM_PERSONA_FEATURE_COLUMNS,
+        ITEM_PERSONA_PATH,
+        ITEM_PERSONA_TEST_PATH,
+        PERSONAS,
+        PERSONA_FEATURE_COLUMNS,
+        PERSONA_RATIO_COLUMNS,
+        USER_PERSONA_DEV_PATH,
+        USER_PERSONA_FEATURE_COLUMNS,
+        USER_PERSONA_PATH,
+        USER_PERSONA_TEST_PATH,
     )
 
 
@@ -37,6 +63,8 @@ DEFAULT_NUMERIC_VALUE = np.nan
 DEFAULT_CATEGORICAL_VALUE = "UNKNOWN"
 DEFAULT_REASON_VALUE = "unknown_candidate_reason"
 DEFAULT_CANDIDATE_PRIOR_WEIGHT = 0.15
+USER_PERSONA_SERVING_COLUMNS = [*PERSONA_RATIO_COLUMNS, "top_persona", "top_persona_ratio"]
+ITEM_PERSONA_SERVING_COLUMNS = [*PERSONA_RATIO_COLUMNS, "top_persona", "top_persona_ratio"]
 
 
 def cast_numeric_features_to_float(frame: pd.DataFrame) -> pd.DataFrame:
@@ -74,6 +102,114 @@ def load_customer_features() -> pd.DataFrame:
     customer_features["customer_id"] = customer_features["customer_id"].astype(str)
     customer_features["age"] = pd.to_numeric(customer_features.get("age"), errors="coerce")
     return customer_features.set_index("customer_id", drop=False)
+
+
+def _resolve_user_persona_path() -> Path | None:
+    for path in (USER_PERSONA_DEV_PATH, USER_PERSONA_PATH, USER_PERSONA_TEST_PATH):
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_item_persona_path() -> Path | None:
+    for path in (ITEM_PERSONA_DEV_PATH, ITEM_PERSONA_PATH, ITEM_PERSONA_TEST_PATH):
+        if path.exists():
+            return path
+    return None
+
+
+@lru_cache(maxsize=1)
+def load_user_persona_features() -> pd.DataFrame:
+    """Load user persona features indexed for low-latency serving lookups."""
+
+    path = _resolve_user_persona_path()
+    columns = ["customer_id", *USER_PERSONA_SERVING_COLUMNS]
+    if path is None:
+        LOGGER.warning("User persona score file not found. Using default persona features.")
+        return pd.DataFrame(columns=columns).set_index("customer_id", drop=False)
+
+    user_personas = pd.read_csv(path, dtype={"customer_id": str}, usecols=columns).fillna("")
+    user_personas["customer_id"] = user_personas["customer_id"].astype(str).str.strip()
+    for column in PERSONA_RATIO_COLUMNS:
+        user_personas[column] = pd.to_numeric(user_personas[column], errors="coerce").fillna(0.0)
+    user_personas["top_persona_ratio"] = pd.to_numeric(user_personas["top_persona_ratio"], errors="coerce").fillna(0.0)
+    user_personas["top_persona"] = user_personas["top_persona"].map(_safe_get_text)
+    return user_personas.set_index("customer_id", drop=False)
+
+
+@lru_cache(maxsize=1)
+def load_item_persona_features() -> pd.DataFrame:
+    """Load item persona features indexed for low-latency serving lookups."""
+
+    path = _resolve_item_persona_path()
+    columns = ["article_id", *ITEM_PERSONA_SERVING_COLUMNS]
+    if path is None:
+        LOGGER.warning("Item persona score file not found. Using default persona features.")
+        return pd.DataFrame(columns=columns).set_index("article_id", drop=False)
+
+    item_personas = pd.read_csv(path, dtype={"article_id": str}, usecols=columns).fillna("")
+    item_personas["article_id"] = item_personas["article_id"].astype(str).str.strip().str.zfill(10)
+    for column in PERSONA_RATIO_COLUMNS:
+        item_personas[column] = pd.to_numeric(item_personas[column], errors="coerce").fillna(0.0)
+    item_personas["top_persona_ratio"] = pd.to_numeric(item_personas["top_persona_ratio"], errors="coerce").fillna(0.0)
+    item_personas["top_persona"] = item_personas["top_persona"].map(_safe_get_text)
+    return item_personas.set_index("article_id", drop=False)
+
+
+def _default_persona_feature(prefix: str, index: pd.Index) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        f"{prefix}_{column}": pd.Series(0.0, index=index, dtype="float64")
+        for column in PERSONA_RATIO_COLUMNS
+    }
+    values[f"{prefix}_top_persona"] = pd.Series(DEFAULT_CATEGORICAL_VALUE, index=index, dtype=object)
+    values[f"{prefix}_top_persona_ratio"] = pd.Series(0.0, index=index, dtype="float64")
+    return values
+
+
+def _attach_serving_persona_features(features: pd.DataFrame) -> pd.DataFrame:
+    """Attach persona features without merging small request frames into large tables."""
+
+    if all(column in features.columns for column in PERSONA_FEATURE_COLUMNS):
+        return features
+
+    enriched = features.copy()
+    index = enriched.index
+    for column, values in _default_persona_feature("user", index).items():
+        enriched[column] = values
+    for column, values in _default_persona_feature("item", index).items():
+        enriched[column] = values
+
+    if "customer_id" in enriched.columns:
+        user_personas = load_user_persona_features()
+        user_ids = enriched["customer_id"].astype(str).str.strip()
+        matched_users = user_personas.reindex(user_ids)
+        for column in PERSONA_RATIO_COLUMNS:
+            enriched[f"user_{column}"] = pd.to_numeric(matched_users[column].to_numpy(), errors="coerce")
+        enriched["user_top_persona"] = pd.Series(matched_users["top_persona"].to_numpy(), index=index).map(_safe_get_text)
+        enriched["user_top_persona_ratio"] = pd.to_numeric(matched_users["top_persona_ratio"].to_numpy(), errors="coerce")
+
+    if "article_id" in enriched.columns:
+        item_personas = load_item_persona_features()
+        article_ids = enriched["article_id"].astype(str).str.strip().str.zfill(10)
+        matched_items = item_personas.reindex(article_ids)
+        for column in PERSONA_RATIO_COLUMNS:
+            enriched[f"item_{column}"] = pd.to_numeric(matched_items[column].to_numpy(), errors="coerce")
+        enriched["item_top_persona"] = pd.Series(matched_items["top_persona"].to_numpy(), index=index).map(_safe_get_text)
+        enriched["item_top_persona_ratio"] = pd.to_numeric(matched_items["top_persona_ratio"].to_numpy(), errors="coerce")
+
+    for column in USER_PERSONA_FEATURE_COLUMNS + ITEM_PERSONA_FEATURE_COLUMNS:
+        enriched[column] = pd.to_numeric(enriched[column], errors="coerce").fillna(0.0)
+    enriched["user_top_persona_ratio"] = pd.to_numeric(enriched["user_top_persona_ratio"], errors="coerce").fillna(0.0)
+    enriched["item_top_persona_ratio"] = pd.to_numeric(enriched["item_top_persona_ratio"], errors="coerce").fillna(0.0)
+    enriched["top_persona_match"] = (
+        enriched["user_top_persona"].ne(DEFAULT_CATEGORICAL_VALUE)
+        & enriched["user_top_persona"].eq(enriched["item_top_persona"])
+    ).astype(int)
+    enriched["persona_match_score"] = sum(
+        enriched[f"user_{persona}_ratio"] * enriched[f"item_{persona}_ratio"]
+        for persona in PERSONAS
+    )
+    return enriched
 
 
 def _safe_get_text(value: Any) -> str:
@@ -208,6 +344,10 @@ def _assemble_ranking_features(
         safe_text_frame[column] = safe_text_frame[column].map(_safe_get_text)
 
     features = pd.DataFrame(index=safe_candidates.index)
+    if "customer_id" in user_features.columns:
+        features["customer_id"] = user_features["customer_id"].astype(str)
+    if "article_id" in safe_candidates.columns:
+        features["article_id"] = safe_candidates["article_id"].astype(str).str.strip().str.zfill(10)
     features["age"] = pd.to_numeric(user_features.get("age"), errors="coerce")
     features["age_bucket"] = user_features["age_bucket"].map(_safe_get_text)
     features["fashion_news_frequency"] = user_features["fashion_news_frequency"].map(_safe_get_text)
@@ -236,6 +376,7 @@ def _assemble_ranking_features(
     for column in session_signal_features.columns:
         features[column] = session_signal_features[column]
 
+    features = _attach_serving_persona_features(features)
     return prepare_inference_features(features, feature_columns=feature_columns)
 
 
@@ -267,6 +408,7 @@ def build_ranking_features(
     fashion_news_frequency = _safe_get_text(user_features.get("fashion_news_frequency"))
 
     user_feature_frame = pd.DataFrame(index=candidate_items.index)
+    user_feature_frame["customer_id"] = user_id
     user_feature_frame["age"] = user_features.get("age", DEFAULT_NUMERIC_VALUE)
     user_feature_frame["age_bucket"] = age_bucket
     user_feature_frame["fashion_news_frequency"] = fashion_news_frequency
@@ -300,6 +442,7 @@ def build_batch_ranking_features(candidate_items: pd.DataFrame) -> pd.DataFrame:
 
     if customer_features.empty:
         user_features = pd.DataFrame(index=safe_candidates.index)
+        user_features["customer_id"] = safe_candidates["customer_id"]
         user_features["age"] = DEFAULT_NUMERIC_VALUE
         user_features["age_bucket"] = DEFAULT_CATEGORICAL_VALUE
         user_features["fashion_news_frequency"] = DEFAULT_CATEGORICAL_VALUE
@@ -312,6 +455,7 @@ def build_batch_ranking_features(candidate_items: pd.DataFrame) -> pd.DataFrame:
             how="left",
         )
         user_features["age"] = pd.to_numeric(user_features.get("age"), errors="coerce")
+        user_features["customer_id"] = user_features["customer_id"].astype(str)
         user_features["age_bucket"] = user_features["age_bucket"].map(_safe_get_text)
         user_features["fashion_news_frequency"] = user_features["fashion_news_frequency"].map(_safe_get_text)
         user_features["club_member_status"] = user_features["club_member_status"].map(_safe_get_text)

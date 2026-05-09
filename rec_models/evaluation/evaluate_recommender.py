@@ -37,6 +37,14 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 DEFAULT_TOP_K = 50
 DEFAULT_EVALUATION_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "processed" / "train_data_dev.csv"
+E2E_EVALUATION_COLUMNS = [
+    "customer_id",
+    "article_id",
+    "label",
+    "sales_channel_id",
+    "recent_clicks",
+    "session_interest",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -360,7 +368,7 @@ def print_evaluation_report(results: dict[str, Any], top_k: int) -> None:
 def main() -> None:
     args = parse_args()
 
-    data = enrich_candidate_rows(load_evaluation_data(args.data))
+    data = enrich_candidate_rows(load_evaluation_data(args.data, columns=E2E_EVALUATION_COLUMNS))
     enable_reranking = not args.disable_reranking
     enable_diversity = not args.disable_diversity
     enable_exploration = not args.disable_exploration

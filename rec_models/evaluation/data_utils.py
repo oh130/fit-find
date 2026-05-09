@@ -27,14 +27,19 @@ class EvaluationContext:
     total_candidate_count: int
 
 
-def load_evaluation_data(data_path: Path) -> pd.DataFrame:
+def load_evaluation_data(data_path: Path, columns: list[str] | None = None) -> pd.DataFrame:
     """Load evaluation rows from CSV and normalize core identifiers."""
 
     resolved_path = data_path.expanduser().resolve()
     if not resolved_path.exists():
         raise FileNotFoundError(f"Evaluation data not found: {resolved_path}")
 
-    data = pd.read_csv(resolved_path)
+    if columns is None:
+        data = pd.read_csv(resolved_path)
+    else:
+        header = pd.read_csv(resolved_path, nrows=0)
+        available_columns = [column for column in columns if column in header.columns]
+        data = pd.read_csv(resolved_path, usecols=available_columns)
     required_columns = {"customer_id", "article_id"}
     missing_columns = required_columns - set(data.columns)
     if missing_columns:

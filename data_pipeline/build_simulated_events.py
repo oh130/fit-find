@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / "simulator" / "persona_config_9.yaml"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -23,6 +24,16 @@ MODE_CONFIG = {
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_test.csv",
         "TARGET_EVENTS": 20000,
         "PERSONA_POOL_LIMIT": 1000,
+        "RANDOM_SEED": 42,
+        "START_TIMESTAMP": "2025-01-01T09:00:00",
+    },
+    "dev": {
+        "SIM_USERS_FILE": BASE_DIR / "data" / "processed" / "sim_users_dev.csv",
+        "ITEM_MASTER_FILE": BASE_DIR / "data" / "processed" / "item_master_dev.csv",
+        "ITEM_PERSONA_FILE": BASE_DIR / "data" / "processed" / "item_persona_scores_dev.csv",
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_dev.csv",
+        "TARGET_EVENTS": 200_000,
+        "PERSONA_POOL_LIMIT": 3000,
         "RANDOM_SEED": 42,
         "START_TIMESTAMP": "2025-01-01T09:00:00",
     },

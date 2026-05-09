@@ -17,7 +17,13 @@ try:
         load_two_tower_model_bundle,
         load_two_tower_serving_artifacts,
     )
-    from rec_models.serving.ranking_service import load_customer_features, load_ranking_pipeline, score_candidates
+    from rec_models.serving.ranking_service import (
+        load_customer_features,
+        load_item_persona_features,
+        load_ranking_pipeline,
+        load_user_persona_features,
+        score_candidates,
+    )
     from rec_models.serving.rerank_bridge import rerank_recommendations
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
     from serving.candidate_service import (  # type: ignore[no-redef]
@@ -28,7 +34,13 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
         load_two_tower_model_bundle,
         load_two_tower_serving_artifacts,
     )
-    from serving.ranking_service import load_customer_features, load_ranking_pipeline, score_candidates  # type: ignore[no-redef]
+    from serving.ranking_service import (  # type: ignore[no-redef]
+        load_customer_features,
+        load_item_persona_features,
+        load_ranking_pipeline,
+        load_user_persona_features,
+        score_candidates,
+    )
     from serving.rerank_bridge import rerank_recommendations  # type: ignore[no-redef]
 
 
@@ -65,6 +77,8 @@ def warmup_recommendation_assets() -> None:
     load_two_tower_model_bundle()
     load_ranking_pipeline()
     load_customer_features()
+    load_user_persona_features()
+    load_item_persona_features()
     LOGGER.info("Warmup completed in %sms", _elapsed_ms(warmup_start))
 
 

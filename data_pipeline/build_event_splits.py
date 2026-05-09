@@ -12,6 +12,7 @@ from typing import Sequence
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -21,6 +22,13 @@ MODE_CONFIG = {
         "VALID_FILE": BASE_DIR / "data" / "processed" / "valid_events_test.csv",
         "TEST_FILE": BASE_DIR / "data" / "processed" / "test_events_test.csv",
         "SUMMARY_FILE": BASE_DIR / "data" / "processed" / "event_split_summary_test.json",
+    },
+    "dev": {
+        "INPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events_dev.csv",
+        "TRAIN_FILE": BASE_DIR / "data" / "processed" / "train_events_dev.csv",
+        "VALID_FILE": BASE_DIR / "data" / "processed" / "valid_events_dev.csv",
+        "TEST_FILE": BASE_DIR / "data" / "processed" / "test_events_dev.csv",
+        "SUMMARY_FILE": BASE_DIR / "data" / "processed" / "event_split_summary_dev.json",
     },
     "production": {
         "INPUT_FILE": BASE_DIR / "data" / "processed" / "simulated_events.csv",

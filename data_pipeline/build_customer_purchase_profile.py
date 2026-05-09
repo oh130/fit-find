@@ -13,6 +13,7 @@ CUSTOMERS_FILE = BASE_DIR / "data" / "raw" / "customers.csv"
 TRANSACTIONS_FILE = BASE_DIR / "data" / "raw" / "transactions_train.csv"
 
 # MODE = "production"
+# MODE = "dev"
 MODE = "test"
 
 MODE_CONFIG = {
@@ -21,6 +22,12 @@ MODE_CONFIG = {
         "ITEM_MASTER_FILE": BASE_DIR / "data" / "processed" / "item_master_test.csv",
         "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "customer_purchase_profile_test.csv",
         "LOG_EVERY_N_ROWS": 20_000,
+    },
+    "dev": {
+        "MAX_TRANSACTION_ROWS": 1_000_000,
+        "ITEM_MASTER_FILE": BASE_DIR / "data" / "processed" / "item_master_dev.csv",
+        "OUTPUT_FILE": BASE_DIR / "data" / "processed" / "customer_purchase_profile_dev.csv",
+        "LOG_EVERY_N_ROWS": 100_000,
     },
     "production": {
         "MAX_TRANSACTION_ROWS": None,
