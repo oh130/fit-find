@@ -9,6 +9,7 @@ services:
       - REDIS_PORT=6379
       - SEARCH_ENGINE_URL=http://search-engine:8002
       - REC_MODELS_URL=http://rec-models:8003
+      - GEMINI_API_KEY=AIzaSyB7K66cgd6PeB2ytkLW5ZGFfRh5T6s9Si4
     depends_on:
       - redis
     volumes:

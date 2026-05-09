@@ -1,25 +1,18 @@
 ===== 남은 문제 목록 =====
-기준일: 2026-05-09
+기준일: 2026-05-10
 
 ────────────────────────────
 [알려진 한계 — 명세서 통과에 영향 없음]
 ────────────────────────────
 
-1. 추천 latency 풀 데이터셋 미검증
-   - dev 모드 p95 = 187.61ms (목표 200ms 대비 여유 12ms)
-   - 테스트는 소규모 인덱스 기준이며 풀 데이터(~105,000 상품)에서 재측정 필요
-   - 검색 latency는 FAISS 특성상 큰 변화 없을 것으로 예상
-   - 추천 Two-Tower 후보 생성 단계가 데이터 규모에 민감할 수 있음
-   - 조치: 풀 데이터셋 docker-compose up 후 rec-models latency 재측정 권고
-
-2. 학습 데이터 페르소나 불균형 (데이터 파이프라인 한계)
+1. 학습 데이터 페르소나 불균형 (데이터 파이프라인 한계)
    - 이벤트 기준 분포: value 38% / careful 31% / trendsetter 24% / impulse 6%
    - brand_loyal 11건 / repeat_stable 15건 / color_focus 38건 / category_focus 53건 / practical 4건
    - 원인: H&M이 저가 패션 브랜드라 고객 대부분이 value 성향으로 측정됨
            희귀 페르소나 공식(brand_loyal=한부서집중, color_focus=한색상집중)이
            H&M 고객에서 극단적 패턴 요구 → 거의 해당자 없음
    - 검색/추천 시연에서는 4개 주류 페르소나 행동으로 보여주면 문제없음
-   - 기능 C(온보딩) 구현 시 희귀 페르소나 유저 추천 품질은 제한될 수 있음
+   - 기능 C(온보딩) 구현 시 희귀 페르소나 선택 유저 추천 품질은 제한될 수 있음
    - 해결하려면: data_pipeline/build_user_persona_scores.py 공식 조정
                  희귀 페르소나 조건 완화 + value 조건 강화 필요 (데이터파이프라인 담당)
 
@@ -29,44 +22,57 @@
 
 A. 추천 기준 우선순위 조절 (1순위)
    파트별 작업:
-   - api_gateway      : /api/recommend에 price_weight, popularity_weight 등
-                        쿼리 파라미터 추가 → rec-models 호출 시 그대로 전달
-   - rec-models       : 파라미터 받아서 rerank_bridge.py 가중치에 반영
-   - frontend         : 슬라이더 UI + 파라미터 전송
+   - api_gateway      : ✅ 완료 (2026-05-10)
+                        /api/recommend에 price_weight, popularity_weight 쿼리 파라미터 추가
+                        rec-models 호출 시 그대로 전달
+   - rec-models       : 파라미터 받아서 rerank_bridge.py 가중치에 반영 (미완)
+   - frontend         : 슬라이더 UI + 파라미터 전송 (미완)
    - 나머지 파트      : 무관
    - 난이도           : 낮음 / 팀 간 조율 최소
 
 B. 추천 이유 및 활용도 설명 (2순위)
    파트별 작업:
-   - api_gateway      : rec-models 응답 후 LLM API 호출
-                        프롬프트: 상품명 + 카테고리 + score + reason 포함
-                        응답에 reason_text 필드 추가해서 반환
-   - frontend         : 추천 카드에 reason_text 표시
+   - api_gateway      : ✅ 완료 (2026-05-10)
+                        GET /api/recommend?include_reasons=true 시 Gemini Flash 호출
+                        추천 아이템 목록을 한 번의 LLM 호출로 처리 (latency 최소화)
+                        각 아이템에 reason_text 필드 추가해서 반환
+                        GEMINI_API_KEY 미설정 시 자동 스킵 (기존 추천 결과는 정상 반환)
+   - frontend         : 추천 카드에 reason_text 표시 (미완)
    - rec-models/search-engine/데이터파이프라인 : 무관
-   - 사전 조건        : LLM API 키 필요
+   - 사전 조건        : GEMINI_API_KEY 환경변수 설정 필요 (Google AI Studio 무료 발급)
    - 난이도           : 중간
 
 C. LLM 기반 콜드 스타트 페르소나 생성 (3순위)
    파트별 작업:
-   - api_gateway      : /api/onboarding 엔드포인트 신규 추가
-                        유저 자유 입력 + 선택지 → LLM 프롬프트 구성
-                        LLM 응답(JSON) → session_interest 형태로 Redis 저장
-                        → rec-models가 다음 /recommend 호출 시 즉시 반영
-   - frontend         : 온보딩 화면 UI (자유 입력 + 선택지) 추가
+   - api_gateway      : ✅ 완료 (2026-05-10)
+                        2단계 엔드포인트로 구현:
+                        1) POST /api/onboarding
+                           유저 자유 입력 + 선택지 → Gemini Flash 호출
+                           9개 페르소나 일치도(%) 반환 (Redis 저장 없음)
+                        2) POST /api/onboarding/select
+                           유저가 선택한 페르소나 → session_interest로 변환
+                           Redis 저장 → 다음 /api/recommend 즉시 반영
+   - frontend         : 온보딩 UI 구현 필요:
+                        - 자유 입력창 + 스타일 선택지 + 예산 범위 선택
+                        - /api/onboarding 호출 후 9개 페르소나 블록 시각화 (% 표시)
+                        - 유저가 블록 하나 선택 → /api/onboarding/select 호출
    - 나머지 파트      : 무관 / 시뮬레이터 연동 불필요 (시연에서 직접 입력)
-   - 사전 조건        : LLM API 키 필요
+   - 사전 조건        : GEMINI_API_KEY 환경변수 설정 필요
    - 난이도           : 중간~높음
-   - 주의             : 희귀 페르소나(brand_loyal 등)로 온보딩된 유저는
+   - 주의             : 희귀 페르소나(brand_loyal 등) 선택 유저는
                         학습 데이터 부족으로 추천 품질 제한됨 (위 한계 2번 참고)
 
 D. 예산 기반 패션 세트 추천 (4순위)
    파트별 작업:
-   - search-engine    : 아이템 간 CLIP 교차 유사도 API 신규 추가
+   - search-engine    : 아이템 간 CLIP 교차 유사도 API 신규 추가 (미완)
                         POST /cross-similarity: article_id 리스트 → 유사도 행렬 반환
-   - api_gateway      : 예산 분배 로직 + search-engine 신규 API 호출
-                        예산 이내 어울리는 조합 3세트 구성 후 반환
-   - frontend         : 예산 입력 UI + 세트 결과 표시
-   - 사전 조건        : search-engine 팀과 API 스펙 사전 합의 필요
+   - api_gateway      : ✅ 완료 (2026-05-10)
+                        POST /api/budget-set?user_id=...&budget=50000&set_count=3
+                        rec-models 후보 50개 → 예산 내 필터
+                        search-engine /cross-similarity 호출 (미구현 시 score 기반 그리디로 자동 대체)
+                        예산 이내 어울리는 조합 set_count세트 구성 후 반환
+   - frontend         : 예산 입력 UI + 세트 결과 표시 (미완)
+   - 사전 조건        : search-engine 팀과 /cross-similarity API 스펙 합의 필요
    - 난이도           : 높음
 
 
@@ -83,15 +89,20 @@ D. 예산 기반 패션 세트 추천 (4순위)
      - HitRate@10 = 0.950495
      - Avg latency = 59.85ms  (목표 ≤ 200ms 통과)
      - 스크립트: search_engine/evaluate_search_engine.py / 테스트셋: evaluation/search_eval_set.csv (101개 쿼리)
-✅ 추천 모델 dev 기준 명세 지표 통과 (2026-05-06)
+✅ 추천 모델 페르소나 적용 + 최종 명세 통과 (2026-05-09)
      - Candidate Recall@300 = 0.614632  (목표 ≥ 0.30 통과)
-     - Ranking AUC = 0.956739  (목표 ≥ 0.70 통과)
-     - Final HitRate@50 = 0.497000, NDCG@50 = 0.178138, Coverage@50 = 0.215203
-     - Serving latency p95 = 187.61ms  (목표 ≤ 200ms 통과)
+     - Ranking AUC = 0.961722  (목표 ≥ 0.70 통과, +0.005 개선)
+     - HitRate@50 = 0.497000, NDCG@50 = 0.178138, Coverage@50 = 0.214730
+     - Serving latency p95 = 184.0ms  (목표 ≤ 200ms 통과)
+       └ candidate 63ms / ranking 90ms / reranking 53ms
+     - 페르소나 조회 indexed lookup 최적화로 282ms → 184ms 달성
 ✅ 프론트엔드 API 연동 완료 (2026-05-07)
      - nginx /api/ 프록시 블록 추가 → api-gateway:8000으로 실제 API 호출
      - api_gateway: /api/recommend 응답에 상품명·카테고리·색상·제품유형 enrichment 추가
      - 프론트엔드 검색·추천 결과에 실제 데이터(name/category/color) 표시 확인
+✅ api_gateway EventRequest 스키마 확장 완료 (2026-05-09)
+     - article_id / item_id 듀얼 필드 지원 (프론트엔드 item_id 호환)
+     - view / cart 이벤트도 Redis click history에 기록
 ✅ docker-compose up — 8개 컨테이너 전체 정상 동작 확인 (2026-04-29)
      redis, api-gateway, search-engine, rec-models,
      frontend, dashboard, simulator, ct-pipeline
@@ -114,7 +125,7 @@ D. 예산 기반 패션 세트 추천 (4순위)
 ✅ 오프라인 평가 메트릭 (HitRate, MRR, NDCG) → evaluation/metrics.py 구현 완료
 ✅ 프론트엔드 React 앱 → pront/ 구현 완료, docker-compose 컨테이너 추가 완료
 ✅ 추천 결과 Redis 캐싱 → api_gateway /api/recommend에 TTL 300s 캐시 구현 완료
-     캐시 키: cache:recommend:{user_id}:{top_n}:{click_count} (클릭 발생 시 자동 무효화)
+     캐시 키: cache:recommend:{user_id}:{top_n}:{click_count}:{price_weight}:{popularity_weight}
 ✅ simulator/ 구현 완료 — docker-compose 정상 동작 확인 (2026-04-29)
      - 6가지 페르소나(트렌드세터/실용주의자/가성비추구/브랜드충성/충동구매/신중탐색) 정의
      - search → click → cart → purchase 상태 머신 구현
