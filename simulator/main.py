@@ -52,7 +52,7 @@ def search(query: str, top_k: int = 10) -> list[dict]:
 
 
 def send_event(user_id: str, item_id: str, event_type: str, category: str | None = None) -> bool:
-    payload: dict = {"user_id": user_id, "item_id": item_id, "event_type": event_type}
+    payload: dict = {"user_id": user_id, "article_id": item_id, "event_type": event_type}
     if category:
         payload["category"] = category
     try:

@@ -9,6 +9,7 @@ API Gateway — port 8000
   GET  /health
 """
 
+import csv
 import json
 import os
 import httpx
@@ -31,13 +32,35 @@ IMAGE_ROOT = Path(os.getenv("IMAGE_ROOT", str(DEFAULT_IMAGE_ROOT)))
 if not IMAGE_ROOT.exists() and LOCAL_IMAGE_ROOT.exists():
     IMAGE_ROOT = LOCAL_IMAGE_ROOT
 
+ARTICLES_PATH = Path("/app/data/processed/articles_feature.csv")
+
 feature_store: RedisFeatureStore
+# article_id → {name, category, color, product_type}
+article_meta: dict[str, dict] = {}
+
+
+def _load_article_meta() -> dict[str, dict]:
+    meta: dict[str, dict] = {}
+    if not ARTICLES_PATH.exists():
+        return meta
+    with ARTICLES_PATH.open(encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            aid = row.get("article_id", "").strip()
+            if aid:
+                meta[aid] = {
+                    "name": row.get("prod_name", ""),
+                    "category": row.get("category", ""),
+                    "color": row.get("color", ""),
+                    "product_type": row.get("product_type_name", ""),
+                }
+    return meta
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global feature_store
+    global feature_store, article_meta
     feature_store = RedisFeatureStore(host=REDIS_HOST, port=REDIS_PORT)
+    article_meta = _load_article_meta()
     yield
 
 
@@ -61,9 +84,11 @@ class SearchRequest(BaseModel):
 
 class EventRequest(BaseModel):
     user_id: str
-    item_id: str
-    event_type: str  # "click" | "purchase"
+    article_id: str | None = None
+    item_id: str | None = None  # frontend 호환 (article_id 우선)
+    event_type: str  # "click" | "view" | "cart" | "purchase" | "search"
     category: str | None = None
+    query_text: str | None = None
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────
@@ -121,6 +146,26 @@ async def recommend(
             raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
 
     result = resp.json()
+
+    # pipeline_latency 중첩 구조를 최상위로 풀어서 프론트가 바로 쓸 수 있게 함
+    pl = result.pop("pipeline_latency", {})
+    result.update(pl)
+
+    # 상품명·카테고리를 articles_feature.csv에서 보강
+    enriched = []
+    for i, item in enumerate(result.get("recommendations", []), 1):
+        pid = str(item.get("product_id", ""))
+        meta = article_meta.get(pid, {})
+        enriched.append({
+            **item,
+            "rank": i,
+            "name": meta.get("name") or pid,
+            "category": meta.get("category", ""),
+            "color": meta.get("color", ""),
+            "product_type": meta.get("product_type", ""),
+        })
+    result["recommendations"] = enriched
+
     feature_store.r.set(cache_key, json.dumps(result), ex=RECOMMEND_CACHE_TTL)
     return result
 
@@ -128,10 +173,12 @@ async def recommend(
 @app.post("/api/events")
 async def events(req: EventRequest):
     """클릭/구매 이벤트를 Redis에 저장하고 rec-models 세션도 업데이트한다."""
+    effective_id = req.article_id or req.item_id
+
     # Redis 업데이트
     feature_store.r.incr("ct:event_count")
-    if req.event_type in ("click", "purchase"):
-        feature_store.push_click(req.user_id, req.item_id)
+    if req.event_type in ("click", "view", "cart", "purchase") and effective_id:
+        feature_store.push_click(req.user_id, effective_id)
 
     if req.category:
         interest = feature_store.get_session_interest(req.user_id)
@@ -139,18 +186,19 @@ async def events(req: EventRequest):
         feature_store.set_session_interest(req.user_id, interest)
 
     # rec-models 세션 업데이트 (실패해도 이벤트 저장은 성공으로 처리)
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            await client.post(
-                f"{REC_URL}/session/update",
-                json={
-                    "user_id": req.user_id,
-                    "item_id": req.item_id,
-                    "event": req.event_type,
-                },
-            )
-        except httpx.RequestError:
-            pass  # rec-models가 아직 없어도 게이트웨이는 정상 응답
+    if effective_id:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                await client.post(
+                    f"{REC_URL}/session/update",
+                    json={
+                        "user_id": req.user_id,
+                        "item_id": effective_id,
+                        "event": req.event_type,
+                    },
+                )
+            except httpx.RequestError:
+                pass  # rec-models가 아직 없어도 게이트웨이는 정상 응답
 
     return {"status": "ok"}
 
