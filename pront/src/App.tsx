@@ -1,8 +1,13 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  BudgetSetBundle,
+  OnboardingPersonaScores,
   RecommendationBundle,
+  fetchBudgetSets,
+  fetchOnboardingPersonaScores,
   fetchRecommendations,
   fetchSearchResults,
+  selectOnboardingPersona,
   sendInteractionEvent,
 } from "./api";
 
@@ -28,6 +33,7 @@ type UploadedImage = {
 };
 
 type PersonaOption = {
+  key: string;
   name: string;
   title: string;
   summary: string;
@@ -44,7 +50,7 @@ const baseResults: Record<SearchMode, SearchResult[]> = {
       similarity: 0.94,
       searchType: "텍스트 검색",
       responseTime: "128ms",
-      summary: "광택 있는 블랙 아우터와 실버 하드웨어 조건에 강하게 매칭된 결과입니다.",
+      summary: "질감과 아우터 무드를 반영한 텍스트 기반 탐색 결과입니다.",
       accent: "linear-gradient(135deg, #35244d 0%, #161822 100%)",
     },
     {
@@ -55,161 +61,145 @@ const baseResults: Record<SearchMode, SearchResult[]> = {
       similarity: 0.9,
       searchType: "텍스트 검색",
       responseTime: "128ms",
-      summary: "미니멀, 블랙, 캐주얼 무드 선호가 많이 겹치는 대체 후보입니다.",
+      summary: "미니멀한 블랙 계열 취향과 잘 맞는 후보입니다.",
       accent: "linear-gradient(135deg, #84553a 0%, #1a1d26 100%)",
-    },
-    {
-      id: 3,
-      title: "Night Shift Vegan Leather",
-      brand: "Archive Move",
-      price: "64,000원",
-      similarity: 0.87,
-      searchType: "텍스트 검색",
-      responseTime: "128ms",
-      summary: "소재 질감과 착용 상황 조건을 함께 만족하는 상품입니다.",
-      accent: "linear-gradient(135deg, #04545f 0%, #131620 100%)",
     },
   ],
   image: [
     {
-      id: 4,
+      id: 3,
       title: "Silver Trim Moto Crop",
       brand: "Avenue N",
       price: "76,000원",
       similarity: 0.96,
       searchType: "이미지 검색",
       responseTime: "173ms",
-      summary: "업로드 이미지의 실루엣과 메탈 포인트를 가장 가깝게 반영한 결과입니다.",
+      summary: "업로드 이미지의 실루엣과 광택감을 반영한 결과입니다.",
       accent: "linear-gradient(135deg, #26314c 0%, #11151d 100%)",
     },
     {
-      id: 5,
+      id: 4,
       title: "Gloss Rider Short",
       brand: "Studio Hex",
       price: "58,000원",
       similarity: 0.91,
       searchType: "이미지 검색",
       responseTime: "173ms",
-      summary: "질감과 길이감이 비슷한 이미지 후보를 매칭했습니다.",
+      summary: "유사한 재질과 길이감을 우선 반영한 후보입니다.",
       accent: "linear-gradient(135deg, #5b402f 0%, #181720 100%)",
-    },
-    {
-      id: 6,
-      title: "Metro Faux Leather Zip-up",
-      brand: "Common Surface",
-      price: "39,000원",
-      similarity: 0.88,
-      searchType: "이미지 검색",
-      responseTime: "173ms",
-      summary: "비슷한 착장 비율과 어두운 색 분포를 가진 후보입니다.",
-      accent: "linear-gradient(135deg, #0d5c5c 0%, #141821 100%)",
     },
   ],
   multimodal: [
     {
-      id: 7,
+      id: 5,
       title: "Chrome Detail Urban Rider",
       brand: "Modu Lab",
       price: "98,000원",
       similarity: 0.98,
       searchType: "텍스트 + 이미지",
       responseTime: "214ms",
-      summary: "텍스트 의도와 이미지 특징이 동시에 일치해 가장 높은 점수를 받은 결과입니다.",
+      summary: "텍스트 설명과 이미지 특징이 함께 반영된 상위 결과입니다.",
       accent: "linear-gradient(135deg, #42294f 0%, #11131c 100%)",
     },
     {
-      id: 8,
+      id: 6,
       title: "Blackline Cropped Moto",
       brand: "Noir Craft",
       price: "71,000원",
       similarity: 0.94,
       searchType: "텍스트 + 이미지",
       responseTime: "214ms",
-      summary: "질감의 분위기와 업로드 이미지의 디테일을 함께 반영한 검색 결과입니다.",
+      summary: "질감과 스타일 키워드가 함께 맞아 높은 점수를 받은 결과입니다.",
       accent: "linear-gradient(135deg, #72412f 0%, #171923 100%)",
-    },
-    {
-      id: 9,
-      title: "Late Evening Leather Bloom",
-      brand: "Volume Edit",
-      price: "83,000원",
-      similarity: 0.9,
-      searchType: "텍스트 + 이미지",
-      responseTime: "214ms",
-      summary: "룩의 사용 상황과 이미지 기반 스타일 선호를 함께 반영한 후보입니다.",
-      accent: "linear-gradient(135deg, #00545c 0%, #10151d 100%)",
     },
   ],
 };
 
 const suggestions = [
-  "미니멀 블랙 가죽 재킷",
-  "실버 포인트가 있는 스트리트 룩",
-  "봄 데일리용 체크 아우터",
+  "미니멀한 블랙 아우터",
+  "실버 디테일이 있는 스트리트 룩",
+  "출근용으로 입을 수 있는 자켓",
 ];
 
 const personaOptions: PersonaOption[] = [
   {
-    name: "트렌드세터",
-    title: "새로운 스타일을 먼저 시도해요",
-    summary: "유행, 바이럴 아이템, 시즌 무드에 빠르게 반응하는 유형입니다.",
-    traits: ["유행 민감", "스타일 실험", "빠른 반응"],
+    key: "trendsetter",
+    name: "트렌드세터형",
+    title: "새로운 스타일을 빠르게 시도해요",
+    summary: "유행과 변화에 민감하고 다양한 룩을 탐색하는 성향입니다.",
+    traits: ["유행 민감", "실험적", "빠른 반응"],
   },
   {
-    name: "실용주의자",
+    key: "practical",
+    name: "실용주의형",
     title: "착용감과 활용도를 중요하게 봐요",
-    summary: "오래 입을 수 있고 여러 상황에 맞는 아이템을 선호하는 유형입니다.",
-    traits: ["활용도 우선", "편안한 착용감", "기본 아이템 선호"],
+    summary: "오래 입기 좋고 다양한 상황에 맞는 아이템을 선호합니다.",
+    traits: ["실용성", "기본 아이템", "활용도"],
   },
   {
-    name: "가성비추구",
-    title: "가격 대비 만족도가 중요해요",
-    summary: "가격, 할인, 품질 균형을 꼼꼼히 보는 유형입니다.",
+    key: "value",
+    name: "가성비추구형",
+    title: "가격 대비 만족도를 중요하게 봐요",
+    summary: "할인과 가격 메리트를 함께 고려하는 성향입니다.",
     traits: ["가격 민감", "할인 선호", "비교 구매"],
   },
   {
+    key: "brand_loyal",
     name: "브랜드충성형",
-    title: "좋아하는 브랜드를 꾸준히 선택해요",
-    summary: "브랜드 정체성과 구매 경험을 중요하게 여기는 유형입니다.",
-    traits: ["브랜드 선호", "재구매 경향", "일관된 취향"],
+    title: "익숙한 브랜드를 꾸준히 선택해요",
+    summary: "기존 만족 경험이 있는 브랜드와 카테고리를 반복 탐색합니다.",
+    traits: ["브랜드 선호", "재구매", "안정적 취향"],
   },
   {
+    key: "impulse",
     name: "충동구매형",
     title: "마음에 들면 빠르게 결정해요",
-    summary: "강한 시각적 매력이나 즉각적인 만족에 반응하는 유형입니다.",
-    traits: ["빠른 결정", "비주얼 반응", "즉시 구매"],
+    summary: "즉각적인 매력과 인상적인 디테일에 민감하게 반응합니다.",
+    traits: ["빠른 결정", "즉흥성", "시각 반응"],
   },
   {
+    key: "careful",
     name: "신중탐색형",
     title: "여러 옵션을 오래 비교해요",
-    summary: "리뷰, 소재, 가격을 충분히 검토한 뒤 결정하는 유형입니다.",
-    traits: ["오래 비교", "정보 탐색", "신중한 결정"],
+    summary: "리뷰, 소재, 가격을 충분히 비교한 뒤 결정하는 성향입니다.",
+    traits: ["비교 탐색", "정보 수집", "신중한 결정"],
   },
   {
-    name: "재구매반복형",
-    title: "익숙한 상품을 다시 찾는 편이에요",
-    summary: "만족했던 상품이나 비슷한 스타일을 반복 구매하는 유형입니다.",
-    traits: ["재구매 선호", "검증된 선택", "안정적 취향"],
+    key: "repeat_stable",
+    name: "반복구매형",
+    title: "비슷한 상품을 꾸준히 다시 찾아요",
+    summary: "익숙한 카테고리와 검증된 아이템을 반복 구매하는 성향입니다.",
+    traits: ["재구매", "안정성", "반복 선택"],
   },
   {
+    key: "color_focus",
     name: "색상집중형",
-    title: "선호하는 색감이 뚜렷해요",
-    summary: "특정 컬러 팔레트 안에서 아이템을 고르는 경향이 강한 유형입니다.",
-    traits: ["색감 우선", "톤 일관성", "컬러 필터"],
+    title: "선호하는 색감을 중심으로 봐요",
+    summary: "특정 컬러 계열을 우선해서 탐색하는 경향이 강합니다.",
+    traits: ["컬러 우선", "톤 선호", "시각 취향"],
   },
   {
+    key: "category_focus",
     name: "카테고리집중형",
-    title: "관심 카테고리를 깊게 탐색해요",
-    summary: "특정 카테고리 안에서 다양한 옵션을 집중적으로 살펴보는 유형입니다.",
-    traits: ["카테고리 몰입", "내부 비교", "명확한 관심사"],
+    title: "원하는 카테고리를 깊게 파고들어요",
+    summary: "특정 카테고리 안에서 다양한 옵션을 오래 비교합니다.",
+    traits: ["카테고리 몰입", "깊은 비교", "명확한 관심사"],
   },
 ];
+
+const onboardingStyleOptions = ["casual", "minimal", "street", "sporty", "feminine", "classic"];
 
 const emptyBundle: RecommendationBundle = {
   items: [],
   totalLatency: "0ms",
   stages: [],
   persona: "미분류",
+};
+
+const emptyBudgetSetBundle: BudgetSetBundle = {
+  budget: 0,
+  setCount: 0,
+  sets: [],
 };
 
 function ResultVisual({
@@ -231,8 +221,8 @@ function ResultVisual({
 function App() {
   const [isRegistered, setIsRegistered] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [selectedOnboardingPersona, setSelectedOnboardingPersona] = useState("트렌드세터");
-  const [query, setQuery] = useState("광택감 있는 블랙 아우터에 실버 포인트가 있는 룩");
+  const [selectedOnboardingPersona, setSelectedOnboardingPersona] = useState("trendsetter");
+  const [query, setQuery] = useState("광택감 있는 블랙 아우터와 실버 포인트 자켓");
   const [userId, setUserId] = useState("user_1024");
   const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode>("multimodal");
@@ -248,17 +238,29 @@ function App() {
   const [recommendationSeed, setRecommendationSeed] = useState(0);
   const [isRefreshingRecommendations, setIsRefreshingRecommendations] = useState(false);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
+  const [budgetSets, setBudgetSets] = useState<BudgetSetBundle>(emptyBudgetSetBundle);
+  const [isLoadingBudgetSets, setIsLoadingBudgetSets] = useState(false);
+  const [budgetSetError, setBudgetSetError] = useState<string | null>(null);
+
+  const [onboardingDescription, setOnboardingDescription] = useState("");
+  const [selectedStyles, setSelectedStyles] = useState<string[]>(["minimal"]);
+  const [budgetRange, setBudgetRange] = useState("mid");
+  const [personaScores, setPersonaScores] = useState<OnboardingPersonaScores>({});
+  const [isAnalyzingOnboarding, setIsAnalyzingOnboarding] = useState(false);
+  const [isSubmittingPersona, setIsSubmittingPersona] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+
+  const popularityWeight = 100 - recommendationWeight;
+  const budgetLabel = `${Number(budget || 0).toLocaleString("ko-KR")}원`;
 
   const helperMessage = useMemo(() => {
     if (searchMode === "text") {
       return "텍스트 질의만으로 유사 상품을 찾습니다.";
     }
-
     if (searchMode === "image") {
-      return "업로드한 이미지 특징을 기반으로 시각적으로 유사한 상품을 찾습니다.";
+      return "업로드 이미지 특징을 기반으로 시각적으로 비슷한 상품을 찾습니다.";
     }
-
-    return "텍스트 의도와 이미지 특징을 함께 반영해 가장 강한 후보를 우선 정렬합니다.";
+    return "텍스트와 이미지 신호를 함께 반영해 더 강한 후보를 우선 정렬합니다.";
   }, [searchMode]);
 
   useEffect(() => {
@@ -273,12 +275,12 @@ function App() {
       setRecommendationError(null);
 
       try {
-        const bundle = await fetchRecommendations(
-          userId.trim() || "anonymous",
-          topN,
-          recommendationSeed,
-          selectedOnboardingPersona,
-        );
+        const bundle = await fetchRecommendations(userId.trim() || "anonymous", topN, recommendationSeed, {
+          personaHint: selectedOnboardingPersona,
+          priceWeight: recommendationWeight / 100,
+          popularityWeight: popularityWeight / 100,
+          includeReasons: true,
+        });
 
         if (!cancelled) {
           setActiveBundle(bundle);
@@ -300,11 +302,19 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [isRegistered, showOnboarding, userId, topN, recommendationSeed, selectedOnboardingPersona]);
+  }, [
+    isRegistered,
+    showOnboarding,
+    userId,
+    topN,
+    recommendationSeed,
+    selectedOnboardingPersona,
+    recommendationWeight,
+    popularityWeight,
+  ]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-
     if (!file) {
       setUploadedImage(null);
       return;
@@ -357,9 +367,7 @@ function App() {
       setResults(baseResults[nextMode]);
       setActiveLatency(baseResults[nextMode][0]?.responseTime ?? "128ms");
     } finally {
-      setLastSearchedAt(
-        new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }),
-      );
+      setLastSearchedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
       setIsSearching(false);
     }
   };
@@ -376,6 +384,12 @@ function App() {
     setQuery(value);
   };
 
+  const toggleStyleChoice = (style: string) => {
+    setSelectedStyles((current) =>
+      current.includes(style) ? current.filter((value) => value !== style) : [...current, style],
+    );
+  };
+
   const handleSignUp = () => {
     if (!userId.trim()) {
       return;
@@ -385,19 +399,87 @@ function App() {
     setShowOnboarding(true);
   };
 
+  const runOnboardingAnalysis = async () => {
+    if (!userId.trim() || !onboardingDescription.trim()) {
+      setOnboardingError("사용자 ID와 취향 설명을 입력해 주세요.");
+      return;
+    }
+
+    setIsAnalyzingOnboarding(true);
+    setOnboardingError(null);
+
+    try {
+      const scores = await fetchOnboardingPersonaScores({
+        userId: userId.trim(),
+        description: onboardingDescription.trim(),
+        styleChoices: selectedStyles,
+        budgetRange,
+      });
+
+      setPersonaScores(scores);
+      const topPersona = Object.entries(scores).sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (topPersona) {
+        setSelectedOnboardingPersona(topPersona);
+      }
+    } catch {
+      setOnboardingError("페르소나 분석에 실패했습니다. 백엔드 설정을 확인해 주세요.");
+    } finally {
+      setIsAnalyzingOnboarding(false);
+    }
+  };
+
   const refreshRecommendations = () => {
     setRecommendationSeed((current) => current + 1);
   };
 
-  const startWithPersona = () => {
-    setShowOnboarding(false);
-    setRecommendationSeed(0);
+  const loadBudgetSets = async () => {
+    const parsedBudget = Number(budget);
+    if (!userId.trim() || !Number.isFinite(parsedBudget) || parsedBudget <= 0) {
+      setBudgetSetError("유효한 사용자 ID와 예산을 입력해 주세요.");
+      return;
+    }
+
+    setIsLoadingBudgetSets(true);
+    setBudgetSetError(null);
+
+    try {
+      const bundle = await fetchBudgetSets({
+        userId: userId.trim(),
+        budget: parsedBudget,
+        setCount: 3,
+      });
+      setBudgetSets(bundle);
+    } catch {
+      setBudgetSetError("예산 세트 추천 결과를 불러오지 못했습니다.");
+      setBudgetSets(emptyBudgetSetBundle);
+    } finally {
+      setIsLoadingBudgetSets(false);
+    }
   };
 
-  const popularityWeight = 100 - recommendationWeight;
+  const startWithPersona = async () => {
+    setIsSubmittingPersona(true);
+    setOnboardingError(null);
+
+    try {
+      await selectOnboardingPersona({
+        userId: userId.trim() || "anonymous",
+        persona: selectedOnboardingPersona,
+      });
+      setShowOnboarding(false);
+      setRecommendationSeed(0);
+    } catch {
+      setOnboardingError("선택한 페르소나를 저장하지 못했습니다.");
+    } finally {
+      setIsSubmittingPersona(false);
+    }
+  };
+
   const modeLabel =
     searchMode === "multimodal" ? "멀티모달" : searchMode === "image" ? "이미지" : "텍스트";
-  const budgetLabel = `${Number(budget || 0).toLocaleString("ko-KR")}원`;
+  const selectedPersonaLabel =
+    personaOptions.find((persona) => persona.key === selectedOnboardingPersona)?.name ??
+    selectedOnboardingPersona;
 
   if (showOnboarding) {
     return (
@@ -405,28 +487,71 @@ function App() {
         <section className="onboarding-panel">
           <div className="onboarding-copy">
             <p className="eyebrow">Cold Start Onboarding</p>
-            <h1>처음 방문하셨군요. 먼저 쇼핑 성향을 알려주세요.</h1>
+            <h1>처음 방문하셨군요. 먼저 취향을 알려주세요.</h1>
             <p>
-              추천 정확도를 높이기 위해 가장 가까운 페르소나를 하나 선택해 주세요. 이 선택은
-              초기 추천에만 사용되고 이후 행동 데이터로 계속 업데이트됩니다.
+              자유 입력과 스타일 선택을 바탕으로 페르소나를 추정한 뒤, 원하는 페르소나를 확정하면
+              바로 추천에 반영됩니다.
             </p>
+          </div>
+
+          <div className="search-composer">
+            <label className="search-box">
+              <span>취향 설명</span>
+              <input
+                value={onboardingDescription}
+                onChange={(event) => setOnboardingDescription(event.target.value)}
+                placeholder="예: 미니멀한 블랙 아우터와 실용적인 출근룩을 자주 봅니다"
+                aria-label="온보딩 취향 설명"
+              />
+            </label>
+
+            <div className="signal-list">
+              {onboardingStyleOptions.map((style) => (
+                <button
+                  key={style}
+                  type="button"
+                  className={selectedStyles.includes(style) ? "mini-button active" : "mini-button"}
+                  onClick={() => toggleStyleChoice(style)}
+                >
+                  {style}
+                </button>
+              ))}
+            </div>
+
+            <div className="recommendation-toolbar">
+              <label className="user-id-field">
+                <span>예산 범위</span>
+                <select value={budgetRange} onChange={(event) => setBudgetRange(event.target.value)}>
+                  <option value="low">Low</option>
+                  <option value="mid">Mid</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={runOnboardingAnalysis}
+                disabled={isAnalyzingOnboarding}
+              >
+                {isAnalyzingOnboarding ? "분석 중..." : "페르소나 분석"}
+              </button>
+            </div>
           </div>
 
           <div className="persona-grid">
             {personaOptions.map((persona) => (
               <button
-                key={persona.name}
+                key={persona.key}
                 type="button"
                 className={
-                  selectedOnboardingPersona === persona.name
-                    ? "persona-option active"
-                    : "persona-option"
+                  selectedOnboardingPersona === persona.key ? "persona-option active" : "persona-option"
                 }
-                onClick={() => setSelectedOnboardingPersona(persona.name)}
+                onClick={() => setSelectedOnboardingPersona(persona.key)}
               >
                 <p className="persona-name">{persona.name}</p>
                 <h2>{persona.title}</h2>
                 <p className="persona-summary">{persona.summary}</p>
+                <strong>{personaScores[persona.key] ?? 0}%</strong>
                 <div className="persona-traits">
                   {persona.traits.map((trait) => (
                     <span key={trait} className="badge">
@@ -441,12 +566,18 @@ function App() {
           <div className="onboarding-footer">
             <div className="persona-card">
               <span>선택한 페르소나</span>
-              <strong>{selectedOnboardingPersona}</strong>
+              <strong>{selectedPersonaLabel}</strong>
             </div>
-            <button type="button" className="primary-button" onClick={startWithPersona}>
-              이 성향으로 시작하기
+            <button
+              type="button"
+              className="primary-button"
+              onClick={startWithPersona}
+              disabled={isSubmittingPersona || Object.keys(personaScores).length === 0}
+            >
+              {isSubmittingPersona ? "저장 중..." : "이 페르소나로 시작하기"}
             </button>
           </div>
+          {onboardingError ? <p className="status-text">{onboardingError}</p> : null}
         </section>
       </div>
     );
@@ -457,14 +588,14 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">ModeMosaic</p>
-          <h1>텍스트와 이미지 검색, 개인화 추천까지 이어지는 패션 탐색 화면</h1>
+          <h1>검색부터 개인화 추천까지 이어지는 패션 탐색 화면</h1>
         </div>
         <div className="topbar-meta">
           <span>검색 모드: {modeLabel}</span>
           <span>최근 검색: {lastSearchedAt}</span>
           <span>추천 대상: {userId}</span>
           <span>회원 상태: {isRegistered ? "가입 완료" : "미가입"}</span>
-          <span>초기 페르소나: {selectedOnboardingPersona}</span>
+          <span>온보딩 페르소나: {selectedPersonaLabel}</span>
           <span>추론 페르소나: {activeBundle.persona}</span>
           <span>추천 Top-N: {topN}</span>
           <span>
@@ -479,7 +610,7 @@ function App() {
           <div className="section-heading">
             <div>
               <p className="eyebrow">Registration</p>
-              <h3>먼저 user_id로 회원가입을 진행하세요</h3>
+              <h3>먼저 user_id로 회원가입을 진행해 주세요</h3>
             </div>
           </div>
           <div className="signup-row">
@@ -502,18 +633,17 @@ function App() {
             </button>
           </div>
           <p className="status-text signup-text">
-            회원가입 버튼을 누르면 다음 단계로 페르소나 후보가 열리고, 그 결과가 초기 추천에
-            반영됩니다.
+            회원가입 후 온보딩에서 취향을 분석하고, 그 결과를 초기 추천에 바로 반영합니다.
           </p>
         </section>
 
         <section className="hero-panel">
           <div className="hero-copy">
             <p className="eyebrow">Search Console</p>
-            <h2>검색 시작점에서 바로 멀티모달 탐색이 가능하도록 구성한 화면</h2>
+            <h2>검색 시작점에서 바로 멀티모달 탐색이 가능한 화면</h2>
             <p className="hero-description">
               텍스트 질의와 이미지 업로드를 함께 받아 검색 타입을 자동으로 판단하고, 결과 카드에는
-              유사도 점수와 응답 시간을 함께 보여줍니다.
+              유사도와 응답 시간을 함께 보여줍니다.
             </p>
 
             <div className="suggestion-row">
@@ -560,7 +690,7 @@ function App() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="예: 광택감 있는 블랙 아우터에 실버 포인트가 있는 룩"
+                placeholder="예: 광택감 있는 블랙 아우터와 실버 포인트 자켓"
                 aria-label="텍스트 검색어"
               />
             </label>
@@ -572,7 +702,7 @@ function App() {
                 <span>
                   {uploadedImage
                     ? `${uploadedImage.name} · ${uploadedImage.sizeLabel}`
-                    : "착장 사진, 스크린샷, 무드보드 이미지를 올려보세요."}
+                    : "착장 사진, 스크린샷, 무드보드 이미지를 올려 보세요"}
                 </span>
               </label>
 
@@ -601,9 +731,7 @@ function App() {
               <button type="submit" className="primary-button" disabled={isSearching}>
                 {isSearching ? "검색 중..." : "검색 실행"}
               </button>
-              <span className="search-hint">
-                텍스트만, 이미지만, 또는 둘을 함께 검색할 수 있습니다.
-              </span>
+              <span className="search-hint">텍스트만, 이미지만, 또는 둘 다 함께 검색할 수 있습니다.</span>
             </div>
           </form>
         </section>
@@ -670,7 +798,7 @@ function App() {
               </label>
               <div className="persona-card">
                 <span>Onboarding Persona</span>
-                <strong>{selectedOnboardingPersona}</strong>
+                <strong>{selectedPersonaLabel}</strong>
               </div>
               <div className="persona-card">
                 <span>Detected Persona</span>
@@ -708,7 +836,15 @@ function App() {
                 onClick={refreshRecommendations}
                 disabled={isRefreshingRecommendations || !isRegistered}
               >
-                {isRefreshingRecommendations ? "재추천 중..." : "재추천"}
+                {isRefreshingRecommendations ? "새로고침 중..." : "새로고침"}
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={loadBudgetSets}
+                disabled={isLoadingBudgetSets || !isRegistered}
+              >
+                {isLoadingBudgetSets ? "세트 구성 중..." : "예산 세트 추천"}
               </button>
             </div>
           </div>
@@ -717,10 +853,7 @@ function App() {
             <div className="weight-copy">
               <p className="eyebrow">Diversity Control</p>
               <h4>추천형과 인기형 가중치 조절</h4>
-              <p>
-                추천형을 높이면 개인 성향이 강해지고, 인기형을 높이면 더 대중적인 상품이 상위에
-                노출됩니다.
-              </p>
+              <p>슬라이더를 움직이면 추천 호출 시 가격/인기 가중치가 함께 반영됩니다.</p>
             </div>
             <div className="weight-control">
               <div className="weight-labels">
@@ -739,16 +872,13 @@ function App() {
           </div>
 
           {!isRegistered ? (
-            <p className="status-text">
-              회원가입과 페르소나 선택을 완료하면 추천 결과를 불러옵니다.
-            </p>
+            <p className="status-text">회원가입과 온보딩을 마치면 추천 결과를 불러옵니다.</p>
           ) : null}
           {recommendationError ? <p className="status-text">{recommendationError}</p> : null}
           {isRefreshingRecommendations ? (
-            <p className="status-text">
-              추천 API에서 {userId} 기반 결과를 불러오는 중입니다.
-            </p>
+            <p className="status-text">추천 API에서 최신 결과를 불러오는 중입니다.</p>
           ) : null}
+          {budgetSetError ? <p className="status-text">{budgetSetError}</p> : null}
 
           <div className="stage-list">
             {activeBundle.stages.map((stage) => (
@@ -778,15 +908,66 @@ function App() {
                   <p>{item.reason}</p>
                   <div className="result-stats">
                     <span className="badge">추천 점수 {(item.score * 100).toFixed(1)}%</span>
-                    <span className="badge">개인화 추천</span>
                     <span className="badge">{userId}</span>
                     <span className="badge">{activeBundle.persona}</span>
                     <span className="badge">예산 {budgetLabel}</span>
-                    <span className="badge">
-                      추천형 {recommendationWeight} / 인기형 {popularityWeight}
-                    </span>
-                    <span className="badge">추천 이유 표시</span>
                   </div>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <div className="section-heading" style={{ marginTop: 24 }}>
+            <div>
+              <p className="eyebrow">Budget Set</p>
+              <h3>예산 기반 세트 추천</h3>
+            </div>
+            <div className="heading-metrics">
+              <span className="metric">예산 {budgetLabel}</span>
+              <span className="metric">세트 수 {budgetSets.setCount}</span>
+            </div>
+          </div>
+
+          {budgetSets.sets.length === 0 ? (
+            <p className="status-text">예산 세트 추천 버튼을 누르면 세트 조합 결과가 여기에 표시됩니다.</p>
+          ) : null}
+
+          <div className="recommendation-list">
+            {budgetSets.sets.map((setItems, setIndex) => (
+              <article key={`set-${setIndex}`} className="panel">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">Outfit Set</p>
+                    <h3>세트 {setIndex + 1}</h3>
+                  </div>
+                  <div className="heading-metrics">
+                    <span className="metric">
+                      총액{" "}
+                      {setItems
+                        .reduce((sum, item) => sum + Number(item.price.replace(/[^0-9]/g, "") || 0), 0)
+                        .toLocaleString("ko-KR")}
+                      원
+                    </span>
+                  </div>
+                </div>
+                <div className="result-list">
+                  {setItems.map((item) => (
+                    <div key={`${setIndex}-${item.id}`} className="result-card">
+                      <ResultVisual imageUrl={item.imageUrl} title={item.title} accent={item.accent} />
+                      <div className="result-meta">
+                        <div className="result-topline">
+                          <p>{item.brand}</p>
+                          <strong>{item.price}</strong>
+                        </div>
+                        <h4>{item.title}</h4>
+                        <p>{item.category}</p>
+                        <div className="result-stats">
+                          <span className="badge">세트 점수 {(item.score * 100).toFixed(1)}%</span>
+                          <span className="badge">{item.category}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </article>
             ))}

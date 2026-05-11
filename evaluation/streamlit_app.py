@@ -27,6 +27,142 @@ DEFAULT_RELEVANT_LISTS = """[
 DEFAULT_CONTROL = "0,1,0,0,1,0,1,0,0,1"
 DEFAULT_TREATMENT = "1,1,0,1,1,0,1,1,0,1"
 SEARCH_REPORT_PATH = Path(__file__).resolve().with_name("search_metrics_report.json")
+RECOMMENDATION_REPORT_PATH = (
+    Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "baseline" / "baseline_metrics.json"
+)
+
+PERSONA_LABELS = {
+    "trendsetter": "트렌드세터형",
+    "practical": "실용주의형",
+    "value": "가성비추구형",
+    "brand_loyal": "브랜드충성형",
+    "impulse": "충동구매형",
+    "careful": "신중탐색형",
+    "repeat_stable": "반복구매형",
+    "color_focus": "색상집중형",
+    "category_focus": "카테고리집중형",
+}
+
+DEFAULT_PERSONA_SCORES = {
+    "trendsetter": 28,
+    "practical": 16,
+    "value": 14,
+    "brand_loyal": 7,
+    "impulse": 6,
+    "careful": 12,
+    "repeat_stable": 5,
+    "color_focus": 8,
+    "category_focus": 4,
+}
+
+DEFAULT_ONBOARDING_RESPONSE = {
+    "persona_scores": DEFAULT_PERSONA_SCORES,
+}
+
+DEFAULT_RECOMMENDATION_RESPONSE = {
+    "user_id": "user_1024",
+    "persona": "trendsetter",
+    "recommendations": [
+        {
+            "product_id": "0825137001",
+            "name": "Urban Edge Rider Jacket",
+            "brand": "Mode Atelier",
+            "category": "Outer",
+            "price": 89000,
+            "score": 0.94,
+            "rank": 1,
+            "reason": "ranking_score",
+            "reason_text": "최근 탐색한 블랙 아우터 취향과 가장 가깝고, 실버 포인트 디테일이 잘 맞습니다.",
+        },
+        {
+            "product_id": "0921184002",
+            "name": "Minimal Zip Blouson",
+            "brand": "Noir Form",
+            "category": "Top",
+            "price": 42000,
+            "score": 0.9,
+            "rank": 2,
+            "reason": "session_interest_match",
+            "reason_text": "미니멀한 출근룩 수요와 예산 범위를 함께 만족하는 안정적인 후보입니다.",
+        },
+        {
+            "product_id": "0754401005",
+            "name": "Chrome Detail Urban Rider",
+            "brand": "Modu Lab",
+            "category": "Accessory",
+            "price": 58000,
+            "score": 0.87,
+            "rank": 3,
+            "reason": "mab_exploration",
+            "reason_text": "현재 취향과 유사하면서도 새로운 조합을 탐색하기 위한 실험 슬롯 상품입니다.",
+        },
+    ],
+    "pipeline_latency": {
+        "candidate_ms": 48,
+        "ranking_ms": 61,
+        "reranking_ms": 18,
+        "total_ms": 127,
+    },
+}
+
+DEFAULT_BUDGET_SET_RESPONSE = {
+    "budget": 200000,
+    "set_count": 2,
+    "sets": [
+        [
+            {
+                "article_id": "0825137001",
+                "name": "Urban Edge Rider Jacket",
+                "brand": "Mode Atelier",
+                "category": "Outer",
+                "price_int": 89000,
+                "score": 0.94,
+            },
+            {
+                "article_id": "0921184002",
+                "name": "Minimal Zip Blouson",
+                "brand": "Noir Form",
+                "category": "Top",
+                "price_int": 42000,
+                "score": 0.9,
+            },
+            {
+                "article_id": "0754401005",
+                "name": "Chrome Detail Urban Rider",
+                "brand": "Modu Lab",
+                "category": "Accessory",
+                "price_int": 58000,
+                "score": 0.87,
+            },
+        ],
+        [
+            {
+                "article_id": "0861123007",
+                "name": "Blackline Cropped Moto",
+                "brand": "Noir Craft",
+                "category": "Outer",
+                "price_int": 71000,
+                "score": 0.91,
+            },
+            {
+                "article_id": "0738829004",
+                "name": "Gloss Rider Short",
+                "brand": "Studio Hex",
+                "category": "Bottom",
+                "price_int": 58000,
+                "score": 0.84,
+            },
+            {
+                "article_id": "0910022008",
+                "name": "Silver Trim Moto Crop",
+                "brand": "Avenue N",
+                "category": "Top",
+                "price_int": 76000,
+                "score": 0.88,
+            },
+        ],
+    ],
+}
 
 
 def parse_nested_list(raw_text: str) -> list[list[str]]:
@@ -228,6 +364,241 @@ else:
         "Run `python .\\search_engine\\generate_search_metrics_report.py --endpoint http://localhost:8002/search` "
         "and refresh this page after the JSON file is generated."
     )
+
+st.divider()
+st.subheader("Recommendation Metrics")
+if RECOMMENDATION_REPORT_PATH.exists():
+    try:
+        report = json.loads(RECOMMENDATION_REPORT_PATH.read_text(encoding="utf-8"))
+        metadata = report.get("metadata", {})
+        candidate = report.get("candidate", {})
+        ranking = report.get("ranking", {})
+        recommendation = report.get("recommendation", {}).get("current_model", {})
+        cold_start = recommendation.get("cold_start_subset", {})
+
+        rec_cards = st.columns(6)
+        rec_cards[0].metric("Recall@300", f"{candidate.get('Recall@300', 0.0):.4f}")
+        rec_cards[1].metric("Ranking AUC", f"{ranking.get('auc', 0.0):.4f}")
+        rec_cards[2].metric("HitRate@50", f"{recommendation.get('HitRate@50', 0.0):.4f}")
+        rec_cards[3].metric("NDCG@50", f"{recommendation.get('NDCG@50', 0.0):.4f}")
+        rec_cards[4].metric("Coverage@50", f"{recommendation.get('Coverage@50', 0.0):.4f}")
+        rec_cards[5].metric("Users", f"{recommendation.get('users_evaluated', 0)}")
+
+        recommendation_df = pd.DataFrame(
+            [
+                {"metric": "Recall@300", "value": candidate.get("Recall@300", 0.0), "group": "Candidate"},
+                {"metric": "Ranking AUC", "value": ranking.get("auc", 0.0), "group": "Ranking"},
+                {"metric": "HitRate@50", "value": recommendation.get("HitRate@50", 0.0), "group": "Recommendation"},
+                {"metric": "NDCG@50", "value": recommendation.get("NDCG@50", 0.0), "group": "Recommendation"},
+                {"metric": "Coverage@50", "value": recommendation.get("Coverage@50", 0.0), "group": "Recommendation"},
+            ]
+        )
+        recommendation_chart = (
+            alt.Chart(recommendation_df)
+            .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+            .encode(
+                x=alt.X("metric:N", title=None),
+                y=alt.Y("value:Q", scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("group:N", legend=alt.Legend(title="pipeline")),
+                tooltip=["metric", alt.Tooltip("value:Q", format=".4f"), "group"],
+            )
+            .properties(height=280)
+        )
+        st.altair_chart(recommendation_chart, use_container_width=True)
+
+        rec_meta_col, cold_start_col = st.columns(2)
+        with rec_meta_col:
+            st.markdown("**Recommendation Report Summary**")
+            st.write(
+                {
+                    "source_rows": metadata.get("rows", 0),
+                    "users": metadata.get("users", 0),
+                    "items": metadata.get("items", 0),
+                    "top_k": metadata.get("top_k", 0),
+                    "candidate_k": metadata.get("candidate_k", 0),
+                }
+            )
+        with cold_start_col:
+            st.markdown("**Cold Start Subset**")
+            st.write(
+                {
+                    "users_evaluated": cold_start.get("users_evaluated", 0),
+                    "HitRate@50": round(float(cold_start.get("HitRate@50", 0.0)), 4),
+                    "NDCG@50": round(float(cold_start.get("NDCG@50", 0.0)), 4),
+                    "Coverage@50": round(float(cold_start.get("Coverage@50", 0.0)), 4),
+                }
+            )
+        st.caption(f"Report source: {RECOMMENDATION_REPORT_PATH.name}")
+    except Exception as error:
+        st.error(f"Recommendation report error: {error}")
+else:
+    st.info("Recommendation metrics report not found.")
+
+st.divider()
+demo_col_left, demo_col_right = st.columns(2)
+
+with demo_col_left:
+    st.subheader("Onboarding Persona Preview")
+    st.caption("LLM 온보딩 결과를 발표용으로 빠르게 시각화하는 섹션")
+    persona_source = st.radio(
+        "Persona source",
+        options=["Default sample", "Manual JSON"],
+        horizontal=True,
+        key="persona_source",
+    )
+
+    persona_scores = DEFAULT_ONBOARDING_RESPONSE["persona_scores"]
+    if persona_source == "Manual JSON":
+        persona_json = st.text_area(
+            "Persona scores JSON",
+            value=json.dumps(DEFAULT_ONBOARDING_RESPONSE, ensure_ascii=False, indent=2),
+            height=220,
+        )
+        try:
+            parsed_payload = json.loads(persona_json)
+            parsed_scores = parsed_payload.get("persona_scores", {}) if isinstance(parsed_payload, dict) else {}
+            if isinstance(parsed_scores, dict):
+                persona_scores = {str(key): float(value) for key, value in parsed_scores.items()}
+        except Exception as error:
+            st.error(f"Persona JSON error: {error}")
+
+    persona_df = pd.DataFrame(
+        [
+            {"persona": PERSONA_LABELS.get(key, key), "score": value}
+            for key, value in persona_scores.items()
+        ]
+    ).sort_values("score", ascending=False)
+
+    top_persona = persona_df.iloc[0]["persona"] if not persona_df.empty else "-"
+    st.metric("Top Persona", top_persona)
+
+    persona_chart = (
+        alt.Chart(persona_df)
+        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+        .encode(
+            x=alt.X("score:Q", title="score (%)"),
+            y=alt.Y("persona:N", sort="-x", title=None),
+            color=alt.value("#1F77B4"),
+            tooltip=["persona", alt.Tooltip("score:Q", format=".1f")],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(persona_chart, use_container_width=True)
+    st.dataframe(persona_df, use_container_width=True, hide_index=True)
+    with st.expander("Onboarding API payload preview", expanded=False):
+        st.json({"persona_scores": persona_scores})
+
+with demo_col_right:
+    st.subheader("Budget Set Preview")
+    st.caption("예산 기반 세트 추천 결과를 발표용으로 미리 보여주는 섹션")
+    budget_limit = st.number_input("Budget", min_value=10000, value=DEFAULT_BUDGET_SET_RESPONSE["budget"], step=10000)
+    budget_rows = []
+    for set_index, set_items in enumerate(DEFAULT_BUDGET_SET_RESPONSE["sets"], start=1):
+        for item in set_items:
+            budget_rows.append(
+                {
+                    "set_name": f"세트 {set_index}",
+                    "article_id": item["article_id"],
+                    "item_name": item["name"],
+                    "brand": item["brand"],
+                    "category": item["category"],
+                    "price": item["price_int"],
+                    "score": item["score"],
+                }
+            )
+    budget_set_df = pd.DataFrame(budget_rows)
+    total_by_set = budget_set_df.groupby("set_name", as_index=False)["price"].sum()
+    total_by_set["within_budget"] = total_by_set["price"] <= budget_limit
+
+    budget_cards = st.columns(len(total_by_set) if len(total_by_set) > 0 else 1)
+    for card, row in zip(budget_cards, total_by_set.itertuples(index=False)):
+        card.metric(
+            row.set_name,
+            f"{int(row.price):,}원",
+            "PASS" if row.within_budget else "OVER",
+        )
+
+    budget_chart = (
+        alt.Chart(total_by_set)
+        .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+        .encode(
+            x=alt.X("set_name:N", title=None),
+            y=alt.Y("price:Q", title="total price"),
+            color=alt.Color(
+                "within_budget:N",
+                scale=alt.Scale(domain=[True, False], range=["#2E8B57", "#C0392B"]),
+                legend=alt.Legend(title="within budget"),
+            ),
+            tooltip=["set_name", alt.Tooltip("price:Q", format=",.0f"), "within_budget"],
+        )
+        .properties(height=260)
+    )
+    budget_rule = alt.Chart(pd.DataFrame([{"budget": budget_limit}])).mark_rule(strokeDash=[4, 4]).encode(
+        y="budget:Q"
+    )
+    st.altair_chart(budget_chart + budget_rule, use_container_width=True)
+    st.dataframe(budget_set_df, use_container_width=True, hide_index=True)
+    with st.expander("Budget Set API payload preview", expanded=False):
+        st.json(DEFAULT_BUDGET_SET_RESPONSE)
+
+st.divider()
+st.subheader("Recommendation Reason Preview")
+st.caption("include_reasons=true 응답의 reason_text를 발표용으로 확인하는 섹션")
+
+reason_df = pd.DataFrame(
+    [
+        {
+            "rank": item["rank"],
+            "product_id": item["product_id"],
+            "name": item["name"],
+            "reason": item["reason"],
+            "reason_text": item["reason_text"],
+            "score": item["score"],
+            "price": item["price"],
+        }
+        for item in DEFAULT_RECOMMENDATION_RESPONSE["recommendations"]
+    ]
+)
+
+reason_cards = st.columns(len(reason_df) if len(reason_df) > 0 else 1)
+for card, row in zip(reason_cards, reason_df.itertuples(index=False)):
+    card.metric(f"Rank {row.rank}", row.name, f"{row.score:.2f}")
+
+for row in reason_df.itertuples(index=False):
+    with st.container():
+        st.markdown(f"**#{row.rank} {row.name}**")
+        st.write(
+            {
+                "product_id": row.product_id,
+                "reason": row.reason,
+                "reason_text": row.reason_text,
+                "price": row.price,
+                "score": round(float(row.score), 4),
+            }
+        )
+
+latency_payload = DEFAULT_RECOMMENDATION_RESPONSE["pipeline_latency"]
+latency_df = pd.DataFrame(
+    [
+        {"stage": "Candidate", "latency_ms": latency_payload["candidate_ms"]},
+        {"stage": "Ranking", "latency_ms": latency_payload["ranking_ms"]},
+        {"stage": "Reranking", "latency_ms": latency_payload["reranking_ms"]},
+        {"stage": "Total", "latency_ms": latency_payload["total_ms"]},
+    ]
+)
+reason_latency_chart = (
+    alt.Chart(latency_df)
+    .mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, color="#6C5CE7")
+    .encode(
+        x=alt.X("stage:N", title=None),
+        y=alt.Y("latency_ms:Q", title="ms"),
+        tooltip=["stage", "latency_ms"],
+    )
+    .properties(height=220)
+)
+st.altair_chart(reason_latency_chart, use_container_width=True)
+with st.expander("Recommendation API payload preview", expanded=False):
+    st.json(DEFAULT_RECOMMENDATION_RESPONSE)
 
 st.divider()
 ranking_col, ab_col = st.columns(2)

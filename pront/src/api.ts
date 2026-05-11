@@ -22,6 +22,8 @@ export type RecommendationBundle = {
   persona: string;
 };
 
+export type OnboardingPersonaScores = Record<string, number>;
+
 export type SearchItem = {
   id: number;
   title: string;
@@ -33,6 +35,23 @@ export type SearchItem = {
   summary: string;
   accent: string;
   imageUrl?: string;
+};
+
+export type BudgetSetItem = {
+  id: number;
+  title: string;
+  brand: string;
+  price: string;
+  score: number;
+  category: string;
+  accent: string;
+  imageUrl?: string;
+};
+
+export type BudgetSetBundle = {
+  budget: number;
+  setCount: number;
+  sets: BudgetSetItem[][];
 };
 
 const recommendationFallbackPalette = [
@@ -60,6 +79,7 @@ type ApiRecommendationItem = {
   brand?: string;
   price?: string | number;
   reason?: string;
+  reason_text?: string;
   rank?: number;
   score?: number;
   accent?: string;
@@ -117,6 +137,30 @@ type ApiSearchResponse =
       mode?: string;
     }
   | ApiSearchItem[];
+
+type ApiBudgetSetItem = {
+  article_id?: number | string;
+  product_id?: number | string;
+  id?: number | string;
+  name?: string;
+  title?: string;
+  brand?: string;
+  price?: string | number;
+  price_int?: number;
+  score?: number;
+  category?: string;
+  image_url?: string;
+  imageUrl?: string;
+  img_url?: string;
+  thumbnail_url?: string;
+  thumbnailUrl?: string;
+};
+
+type ApiBudgetSetResponse = {
+  budget?: number;
+  set_count?: number;
+  sets?: ApiBudgetSetItem[][];
+};
 
 function getApiBaseUrl(): string {
   return (import.meta.env.VITE_API_BASE_URL ?? "").trim();
@@ -197,7 +241,10 @@ function normalizeRecommendationBundle(
     title: item.title ?? item.name ?? `Recommendation ${index + 1}`,
     brand: item.brand ?? "Unknown Brand",
     price: toCurrencyLabel(item.price),
-    reason: item.reason ?? "추천 이유 정보가 아직 제공되지 않았습니다.",
+    reason:
+      item.reason_text ??
+      item.reason ??
+      "추천 이유 정보가 아직 제공되지 않았습니다.",
     rank: item.rank ?? index + 1,
     score: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
     accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
@@ -249,15 +296,51 @@ function normalizeSearchItems(
   };
 }
 
+function normalizeBudgetSetBundle(payload: ApiBudgetSetResponse): BudgetSetBundle {
+  const sets = (payload.sets ?? []).map((setItems, setIndex) =>
+    setItems.map((item, itemIndex) => ({
+      id: toNumericId(item.id, item.article_id, item.product_id),
+      title: item.title ?? item.name ?? `Set Item ${itemIndex + 1}`,
+      brand: item.brand ?? "Unknown Brand",
+      price: toCurrencyLabel(item.price_int ?? item.price),
+      score: typeof item.score === "number" ? item.score : Math.max(0.5, 0.9 - itemIndex * 0.08),
+      category: item.category ?? "Unknown Category",
+      accent:
+        recommendationFallbackPalette[(setIndex + itemIndex) % recommendationFallbackPalette.length],
+      imageUrl: toImageUrl(item),
+    })),
+  );
+
+  return {
+    budget: typeof payload.budget === "number" ? payload.budget : 0,
+    setCount: typeof payload.set_count === "number" ? payload.set_count : sets.length,
+    sets,
+  };
+}
+
 export async function fetchRecommendations(
   userId: string,
   topN: number,
   _seed: number,
-  _personaHint?: string,
+  options?: {
+    personaHint?: string;
+    priceWeight?: number;
+    popularityWeight?: number;
+    includeReasons?: boolean;
+  },
 ): Promise<RecommendationBundle> {
   const url = new URL(buildApiUrl("/api/recommend"), window.location.origin);
   url.searchParams.set("user_id", userId);
   url.searchParams.set("top_n", String(topN));
+  if (options?.priceWeight !== undefined) {
+    url.searchParams.set("price_weight", options.priceWeight.toFixed(2));
+  }
+  if (options?.popularityWeight !== undefined) {
+    url.searchParams.set("popularity_weight", options.popularityWeight.toFixed(2));
+  }
+  if (options?.includeReasons) {
+    url.searchParams.set("include_reasons", "true");
+  }
 
   const response = await fetch(url.toString(), {
     headers: {
@@ -318,4 +401,77 @@ export async function sendInteractionEvent(input: {
       category: input.category ?? null,
     }),
   });
+}
+
+export async function fetchOnboardingPersonaScores(input: {
+  userId: string;
+  description: string;
+  styleChoices: string[];
+  budgetRange?: string | null;
+}): Promise<OnboardingPersonaScores> {
+  const response = await fetch(buildApiUrl("/api/onboarding"), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      user_id: input.userId,
+      description: input.description,
+      style_choices: input.styleChoices,
+      budget_range: input.budgetRange ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Onboarding API failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { persona_scores?: OnboardingPersonaScores };
+  return payload.persona_scores ?? {};
+}
+
+export async function selectOnboardingPersona(input: {
+  userId: string;
+  persona: string;
+}): Promise<void> {
+  const response = await fetch(buildApiUrl("/api/onboarding/select"), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      user_id: input.userId,
+      persona: input.persona,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Onboarding select API failed with ${response.status}`);
+  }
+}
+
+export async function fetchBudgetSets(input: {
+  userId: string;
+  budget: number;
+  setCount?: number;
+}): Promise<BudgetSetBundle> {
+  const url = new URL(buildApiUrl("/api/budget-set"), window.location.origin);
+  url.searchParams.set("user_id", input.userId);
+  url.searchParams.set("budget", String(input.budget));
+  url.searchParams.set("set_count", String(input.setCount ?? 3));
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Budget set API failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as ApiBudgetSetResponse;
+  return normalizeBudgetSetBundle(payload);
 }
