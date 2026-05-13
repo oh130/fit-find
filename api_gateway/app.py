@@ -252,9 +252,9 @@ async def _infer_session_interest_from_query(query_text: str | None) -> dict[str
             if category in QUERY_INTEREST_CATEGORIES and _coerce_interest_score(score) > 0
         }
 
-    inferred_interest = await _infer_session_interest_from_query_llm(normalized_query)
+    inferred_interest = _infer_session_interest_from_query_keywords(normalized_query)
     if not inferred_interest:
-        inferred_interest = _infer_session_interest_from_query_keywords(normalized_query)
+        inferred_interest = await _infer_session_interest_from_query_llm(normalized_query)
 
     feature_store.set_query_interest_cache(normalized_query, inferred_interest)
     return inferred_interest
@@ -512,9 +512,10 @@ async def onboarding(req: OnboardingRequest):
         f"- repeat_stable: 동일한 상품이나 카테고리를 반복 구매\n"
         f"- color_focus: 특정 색상 위주로 탐색\n"
         f"- category_focus: 특정 카테고리에만 집중\n\n"
-        f"반드시 아래 JSON 형식으로만 응답하세요:\n"
-        f'{{"trendsetter": 30, "practical": 25, "value": 15, "brand_loyal": 10, '
-        f'"impulse": 5, "careful": 5, "repeat_stable": 5, "color_focus": 3, "category_focus": 2}}'
+        f"사용자 설명에 가장 잘 맞는 페르소나에 높은 점수를, 관련 없는 페르소나에는 낮은 점수를 주세요.\n"
+        f"반드시 아래 JSON 키 이름 그대로, 숫자만 채워서 응답하세요 (합계 100):\n"
+        f'{{"trendsetter": ?, "practical": ?, "value": ?, "brand_loyal": ?, '
+        f'"impulse": ?, "careful": ?, "repeat_stable": ?, "color_focus": ?, "category_focus": ?}}'
     )
 
     try:
@@ -531,9 +532,14 @@ async def onboarding(req: OnboardingRequest):
         if k in valid_personas and isinstance(v, (int, float))
     }
 
-    # 합이 100이 되도록 정규화
+    # 합이 정확히 100이 되도록 정규화 (round 오차는 최댓값 항목에서 보정)
     total = sum(filtered.values())
-    normalized = {k: round(v * 100 / total) for k, v in filtered.items()} if total > 0 else filtered
+    if total == 0:
+        return {"persona_scores": filtered}
+    sorted_keys = sorted(filtered, key=filtered.get, reverse=True)
+    normalized = {k: round(filtered[k] * 100 / total) for k in sorted_keys}
+    diff = 100 - sum(normalized.values())
+    normalized[sorted_keys[0]] += diff
 
     return {"persona_scores": normalized}
 
