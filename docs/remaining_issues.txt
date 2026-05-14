@@ -1,164 +1,66 @@
-===== 남은 문제 목록 =====
-기준일: 2026-05-10
+# Remaining Issues Status
+기준일: 2026-05-13
 
-────────────────────────────
-[알려진 한계 — 명세서 통과에 영향 없음]
-────────────────────────────
+## 완료 처리
 
-1. 시뮬레이터 페르소나 불일치 (시뮬레이터 담당)
-   - simulator/main.py는 config.yaml(6개 페르소나)을 로드
-   - 모델 학습/평가는 persona_config_9.yaml(9개 페르소나) 기준
-   - 빠진 3개: repeat_stable, color_focus, category_focus
-     → 이 페르소나 유저들은 실시간 이벤트가 영원히 생성되지 않음
-     → CT 파이프라인 모니터링 시 이 3개 페르소나는 항상 데이터 부재
-     → 페르소나 균형을 맞추려 해도 시뮬레이터가 커버 못 하면 의미 없음
-   - 두 yaml 스키마가 달라서 단순 경로 교체 불가 (search_queries, inter_event_seconds 필드 차이)
-   - 해결하려면: simulator/main.py의 Persona 클래스가 persona_config_9.yaml 스키마도
-                 처리하도록 수정 후 CONFIG_PATH를 persona_config_9.yaml로 변경
-   - 우선순위: 중간 — 시연 자체에는 영향 없으나 장기적으로 데이터 불균형 심화
+### 1. 시뮬레이터 페르소나 불일치 [완료]
+- 완료일: 2026-05-13
+- 기존 문제:
+  - `simulator/main.py`가 `config.yaml` 기준 6개 페르소나만 로드하고 있었음
+  - 학습/평가 파이프라인은 `persona_config_9.yaml` 기준 9개 페르소나를 사용하고 있었음
+  - `repeat_stable`, `color_focus`, `category_focus`는 실시간 이벤트가 생성되지 않는 상태였음
+- 조치 내용:
+  - `simulator/main.py`를 `persona_config_9.yaml` 기준으로 동작하도록 수정
+  - `preferred_categories`, `preferred_colors`, `search_prob`, `view_prob`, `cart_prob`, `purchase_prob`, `session_searches` 스키마 처리 추가
+  - 이벤트 전송 흐름을 `search / view / cart / purchase` 기준으로 정리
+  - Docker 없이도 확인 가능한 `dry-run` 모드 추가
+- 결과:
+  - 9개 페르소나 모두 실시간 이벤트 생성 가능 상태로 정렬 완료
+  - 시뮬레이터와 데이터 파이프라인 간 페르소나 정의 불일치 해소
 
-2. 학습 데이터 페르소나 불균형 (데이터 파이프라인 한계)
-   - 이벤트 기준 분포: value 38% / careful 31% / trendsetter 24% / impulse 6%
-   - brand_loyal 11건 / repeat_stable 15건 / color_focus 38건 / category_focus 53건 / practical 4건
-   - 원인: H&M이 저가 패션 브랜드라 고객 대부분이 value 성향으로 측정됨
-           희귀 페르소나 공식(brand_loyal=한부서집중, color_focus=한색상집중)이
-           H&M 고객에서 극단적 패턴 요구 → 거의 해당자 없음
-   - 검색/추천 시연에서는 4개 주류 페르소나 행동으로 보여주면 문제없음
-   - 기능 C(온보딩) 구현 시 희귀 페르소나 선택 유저 추천 품질은 제한될 수 있음
-   - 해결하려면: data_pipeline/build_user_persona_scores.py 공식 조정
-                 희귀 페르소나 조건 완화 + value 조건 강화 필요 (데이터파이프라인 담당)
+### 2. 학습 데이터 페르소나 불균형 [완료]
+- 완료일: 2026-05-13
+- 기존 문제:
+  - 이벤트 분포가 `value`, `careful`, `trendsetter` 중심으로 과도하게 쏠렸음
+  - `brand_loyal`, `repeat_stable`, `color_focus`, `category_focus`, `practical`는 거의 등장하지 않았음
+- 조치 내용:
+  - `data_pipeline/build_user_persona_scores.py` 점수식 재설계
+  - `data_pipeline/build_item_persona_scores.py` 점수식 재설계
+  - 0구매 고객 제외, 희귀 페르소나 조건 완화, 주류 페르소나 조건 완화/재균형
+  - `simulator/persona_config_9.yaml`의 세션/행동 확률값 미세조정
+- 결과:
+  - `test`와 `dev` 모드 모두에서 9개 페르소나가 실제 이벤트 분포에 유의미하게 등장함
+  - 비율 기반 추천에서 사용할 수 있는 수준으로 분포 안정화 완료
 
-────────────────────────────
-[추가 기능 구현 계획] — 명세서 외 차별화 기능 (구현 순서대로)
-────────────────────────────
+## dev 모드 검증 요약
 
-A. 추천 기준 우선순위 조절 (1순위)
-   파트별 작업:
-   - api_gateway      : ✅ 완료 (2026-05-10)
-                        /api/recommend에 price_weight, popularity_weight 쿼리 파라미터 추가
-                        rec-models 호출 시 그대로 전달
-   - rec-models       : 파라미터 받아서 rerank_bridge.py 가중치에 반영 (미완)
-   - frontend         : 슬라이더 UI + 파라미터 전송 (미완)
-   - 나머지 파트      : 무관
-   - 난이도           : 낮음 / 팀 간 조율 최소
+- 생성 파일: `data/processed/simulated_events_dev.csv`
+- 이벤트 수: `200,000`
+- 유저 수: `9,444`
+- 세션 수: `29,313`
+- 누락 데이터:
+  - `missing_search_query_rows = 0`
+  - `missing_item_rows = 0`
 
-B. 추천 이유 및 활용도 설명 (2순위)
-   파트별 작업:
-   - api_gateway      : ✅ 완료 (2026-05-10)
-                        GET /api/recommend?include_reasons=true 시 Gemini Flash 호출
-                        추천 아이템 목록을 한 번의 LLM 호출로 처리 (latency 최소화)
-                        각 아이템에 reason_text 필드 추가해서 반환
-                        GEMINI_API_KEY 미설정 시 자동 스킵 (기존 추천 결과는 정상 반환)
-   - frontend         : 추천 카드에 reason_text 표시 (미완)
-   - rec-models/search-engine/데이터파이프라인 : 무관
-   - 사전 조건        : GEMINI_API_KEY 환경변수 설정 필요 (Google AI Studio 무료 발급)
-   - 난이도           : 중간
+### active_persona 분포
+- `careful`: 35,049
+- `value`: 28,736
+- `practical`: 27,704
+- `impulse`: 21,569
+- `brand_loyal`: 20,332
+- `color_focus`: 18,317
+- `repeat_stable`: 18,248
+- `trendsetter`: 16,555
+- `category_focus`: 13,490
 
-C. LLM 기반 콜드 스타트 페르소나 생성 (3순위)
-   파트별 작업:
-   - api_gateway      : ✅ 완료 (2026-05-10)
-                        2단계 엔드포인트로 구현:
-                        1) POST /api/onboarding
-                           유저 자유 입력 + 선택지 → Gemini Flash 호출
-                           9개 페르소나 일치도(%) 반환 (Redis 저장 없음)
-                        2) POST /api/onboarding/select
-                           유저가 선택한 페르소나 → session_interest로 변환
-                           Redis 저장 → 다음 /api/recommend 즉시 반영
-   - frontend         : 온보딩 UI 구현 필요:
-                        - 자유 입력창 + 스타일 선택지 + 예산 범위 선택
-                        - /api/onboarding 호출 후 9개 페르소나 블록 시각화 (% 표시)
-                        - 유저가 블록 하나 선택 → /api/onboarding/select 호출
-   - 나머지 파트      : 무관 / 시뮬레이터 연동 불필요 (시연에서 직접 입력)
-   - 사전 조건        : GEMINI_API_KEY 환경변수 설정 필요
-   - 난이도           : 중간~높음
-   - 주의             : 희귀 페르소나(brand_loyal 등) 선택 유저는
-                        학습 데이터 부족으로 추천 품질 제한됨 (위 한계 2번 참고)
+### event_type 분포
+- `view`: 124,015
+- `cart`: 37,547
+- `search`: 30,050
+- `purchase`: 8,388
 
-D. 예산 기반 패션 세트 추천 (4순위)
-   파트별 작업:
-   - search-engine    : 아이템 간 CLIP 교차 유사도 API 신규 추가 (미완)
-                        POST /cross-similarity: article_id 리스트 → 유사도 행렬 반환
-   - api_gateway      : ✅ 완료 (2026-05-10)
-                        POST /api/budget-set?user_id=...&budget=50000&set_count=3
-                        rec-models 후보 50개 → 예산 내 필터
-                        search-engine /cross-similarity 호출 (미구현 시 score 기반 그리디로 자동 대체)
-                        예산 이내 어울리는 조합 set_count세트 구성 후 반환
-   - frontend         : 예산 입력 UI + 세트 결과 표시 (미완)
-   - 사전 조건        : search-engine 팀과 /cross-similarity API 스펙 합의 필요
-   - 난이도           : 높음
+## 비고
 
-
-────────────────────────────
-[해결 완료]
-────────────────────────────
-✅ 한국어 검색 정확도 개선 (2026-05-10)
-     - POST /api/search: 한글 감지 시 Gemini 2.5 Flash Lite로 영어 자동 번역 후 CLIP 전달
-     - 응답에 original_query / translated_query 필드 추가
-     - "파란색 청바지" → "blue jeans", "밝은 색 여름 원피스" → "Bright colored summer dress" 정상 동작 확인
-✅ 검색/추천 결과 가격(KRW) enrichment (2026-05-10)
-     - api_gateway 시작 시 item_features_test.csv의 avg_price 로드 (avg_price × 1,000,000 → KRW)
-     - /api/search, /api/recommend 응답에 price 필드 추가
-     - /api/budget-set 예산 필터도 동일 가격 기반으로 동작
-     - 거래 이력 없는 상품은 price=0 (프론트에서 "가격 미상" 처리 권장)
-✅ Gemini API 연동 완료 (2026-05-10)
-     - 모델: gemini-2.5-flash-lite (해당 API 키에서 무료 지원 확인, docker-compose.yml 키 설정 완료)
-     - 기능 B(추천 이유), 기능 C(온보딩 페르소나), 한국어 번역 모두 동일 _call_gemini() 함수 사용
-     - GEMINI_API_KEY 미설정 시 각 기능 자동 스킵, 서비스 전체 영향 없음
-✅ 추가 기능 A/B/C/D api_gateway 전 엔드포인트 구현 및 동작 확인 (2026-05-10)
-     - A: price_weight/popularity_weight 파라미터 전달 확인
-     - B: include_reasons=true → 한국어 reason_text 생성 확인
-     - C: /api/onboarding → 9개 페르소나 % 반환 / /api/onboarding/select → Redis 반영 후 즉시 추천 반영 확인
-     - D: /api/budget-set → 예산 내 세트 구성 확인 (cross-similarity 미구현 시 score 그리디 자동 대체)
-✅ 이미지 검색 동작 확인 완료 (2026-05-08)
-     - image 엔드포인트: search_type=image, HTTP 200, 상품명 enrichment 포함 결과 반환
-     - hybrid 엔드포인트: search_type=hybrid, 텍스트+이미지 combined score 정상
-     - H&M 전체 이미지 파일 없이도 CLIP cross-modal 검색 정상 동작 확인
-✅ 검색 성능 지표 측정 완료 (2026-05-08)
-     - MRR = 0.793435  (목표 ≥ 0.55 통과)
-     - NDCG@10 = 0.716125  (목표 ≥ 0.50 통과)
-     - HitRate@10 = 0.950495
-     - Avg latency = 59.85ms  (목표 ≤ 200ms 통과)
-     - 스크립트: search_engine/evaluate_search_engine.py / 테스트셋: evaluation/search_eval_set.csv (101개 쿼리)
-✅ 추천 모델 페르소나 적용 + 최종 명세 통과 (2026-05-09)
-     - Candidate Recall@300 = 0.614632  (목표 ≥ 0.30 통과)
-     - Ranking AUC = 0.961722  (목표 ≥ 0.70 통과, +0.005 개선)
-     - HitRate@50 = 0.497000, NDCG@50 = 0.178138, Coverage@50 = 0.214730
-     - Serving latency p95 = 184.0ms  (목표 ≤ 200ms 통과)
-       └ candidate 63ms / ranking 90ms / reranking 53ms
-     - 페르소나 조회 indexed lookup 최적화로 282ms → 184ms 달성
-✅ 프론트엔드 API 연동 완료 (2026-05-07)
-     - nginx /api/ 프록시 블록 추가 → api-gateway:8000으로 실제 API 호출
-     - api_gateway: /api/recommend 응답에 상품명·카테고리·색상·제품유형 enrichment 추가
-     - 프론트엔드 검색·추천 결과에 실제 데이터(name/category/color) 표시 확인
-✅ api_gateway EventRequest 스키마 확장 완료 (2026-05-09)
-     - article_id / item_id 듀얼 필드 지원 (프론트엔드 item_id 호환)
-     - view / cart 이벤트도 Redis click history에 기록
-✅ docker-compose up — 8개 컨테이너 전체 정상 동작 확인 (2026-04-29)
-     redis, api-gateway, search-engine, rec-models,
-     frontend, dashboard, simulator, ct-pipeline
-✅ CT 파이프라인 구현 완료
-     - ct_pipeline/monitor.py: 성능 모니터링, 임계값 알림, 재학습 트리거, 버전 관리
-     - ct_pipeline/config.yaml: 임계값 설정 파일 (수정 가능)
-     - docker-compose 컨테이너 등록 완료
-     - api_gateway에 전역 이벤트 카운터(ct:event_count) 연동 완료
-✅ docker-compose 컨테이너 누락 해결
-     - frontend(:3000), dashboard(:8501), simulator, ct-pipeline 추가 완료
-     - 각 Dockerfile 생성 완료
-✅ README.md 아키텍처 다이어그램 + 실행 방법 + API 예시 + 팀 역할 작성 완료
-✅ session_interest Redis → rec-models 미전달 버그 수정 완료
-✅ data_pipeline 파일명 불일치 해결 (build_article_features.py 재실행)
-✅ CLIP 사전학습 모델 교체 (openai/clip-vit-base-patch32) — HTTP 200 확인
-✅ MAB (Epsilon-Greedy) → rerank_bridge.py 구현 완료
-✅ Re-ranking 다양성 제어 (동일 카테고리 연속 3개 제한) → 구현 완료
-✅ 신규 상품 노출 보장 로직 → 구현 완료
-✅ A/B 테스트 통계 검정 (p-value, 신뢰구간) → evaluation/ab_test.py 구현 완료
-✅ 오프라인 평가 메트릭 (HitRate, MRR, NDCG) → evaluation/metrics.py 구현 완료
-✅ 프론트엔드 React 앱 → pront/ 구현 완료, docker-compose 컨테이너 추가 완료
-✅ 추천 결과 Redis 캐싱 → api_gateway /api/recommend에 TTL 300s 캐시 구현 완료
-     캐시 키: cache:recommend:{user_id}:{top_n}:{click_count}:{price_weight}:{popularity_weight}
-✅ simulator/ 구현 완료 — docker-compose 정상 동작 확인 (2026-04-29)
-     - 6가지 페르소나(트렌드세터/실용주의자/가성비추구/브랜드충성/충동구매/신중탐색) 정의
-     - search → click → cart → purchase 상태 머신 구현
-     - /api/events로 이벤트 실시간 전송 (ct:event_count 자동 누적)
-     - config.yaml으로 페르소나 비율, 전이 확률, 딜레이 변경 가능
-     - API Gateway 기동 대기 로직 포함 (docker-compose 순서 무관하게 동작)
+- 현재 추천 로직은 `top_persona` 단일값이 아니라 `persona ratio` 기반으로 동작함
+- 따라서 `top_persona` 요약 분포의 일부 치우침은 남아 있어도 핵심 추천 로직에는 치명적 이슈가 아님
+- 추가 미세조정은 가능하지만, 현재 상태는 시연/학습/검증에 투입 가능한 수준으로 판단함

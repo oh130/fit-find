@@ -61,6 +61,11 @@ def recommend_endpoint(
     recent_clicks: str | None = Query(None),
     click_count: int = Query(0, ge=0),
     session_interest: str | None = Query(None),
+    price_weight: float | None = Query(None, ge=0.0, le=5.0),
+    popularity_weight: float | None = Query(None, ge=0.0, le=5.0),
+    diversity_weight: float | None = Query(None, ge=0.0, le=5.0),
+    freshness_weight: float | None = Query(None, ge=0.0, le=5.0),
+    exploration_weight: float | None = Query(None, ge=0.0, le=5.0),
 ) -> dict[str, Any]:
     """Return ranked recommendations for one user."""
 
@@ -70,6 +75,11 @@ def recommend_endpoint(
         recent_clicks=_parse_recent_clicks(recent_clicks),
         click_count=click_count,
         session_interest=_parse_session_interest(session_interest),
+        price_weight=price_weight,
+        popularity_weight=popularity_weight,
+        diversity_weight=diversity_weight,
+        freshness_weight=freshness_weight,
+        exploration_weight=exploration_weight,
     )
 
 

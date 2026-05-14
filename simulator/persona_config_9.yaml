@@ -9,44 +9,44 @@ personas:
     preferred_categories: ["Ladieswear", "Menswear", "Sport"]
     preferred_colors: ["Black", "White", "Blue"]
     price_sensitivity: low
-    search_prob: 0.45
+    search_prob: 0.40
     view_prob: 0.75
     cart_prob: 0.30
     purchase_prob: 0.18
-    session_searches: 4
+    session_searches: 3
 
   practical:
     ratio: 0.14
     preferred_categories: ["Ladieswear", "Menswear"]
     preferred_colors: ["Black", "White", "Grey", "Beige"]
     price_sensitivity: medium
-    search_prob: 0.32
-    view_prob: 0.68
-    cart_prob: 0.32
-    purchase_prob: 0.22
-    session_searches: 2
+    search_prob: 0.38
+    view_prob: 0.72
+    cart_prob: 0.34
+    purchase_prob: 0.24
+    session_searches: 3
 
   value:
     ratio: 0.12
     preferred_categories: ["Divided", "Ladieswear", "Menswear"]
     preferred_colors: ["Black", "Grey", "White"]
     price_sensitivity: high
-    search_prob: 0.40
+    search_prob: 0.36
     view_prob: 0.72
     cart_prob: 0.28
     purchase_prob: 0.16
-    session_searches: 5
+    session_searches: 4
 
   brand_loyal:
     ratio: 0.10
     preferred_categories: ["Ladieswear", "Menswear", "Lingeries/Tights"]
     preferred_colors: ["Black", "Blue", "White"]
     price_sensitivity: medium
-    search_prob: 0.28
-    view_prob: 0.60
-    cart_prob: 0.42
+    search_prob: 0.34
+    view_prob: 0.66
+    cart_prob: 0.40
     purchase_prob: 0.30
-    session_searches: 2
+    session_searches: 3
 
   impulse:
     ratio: 0.10
@@ -54,7 +54,7 @@ personas:
     preferred_colors: ["Black", "Red", "Blue"]
     price_sensitivity: medium
     search_prob: 0.25
-    view_prob: 0.78
+    view_prob: 0.74
     cart_prob: 0.40
     purchase_prob: 0.34
     session_searches: 2
@@ -64,29 +64,29 @@ personas:
     preferred_categories: ["Menswear", "Ladieswear", "Sport"]
     preferred_colors: ["Black", "Grey", "Navy"]
     price_sensitivity: medium_high
-    search_prob: 0.50
-    view_prob: 0.82
+    search_prob: 0.40
+    view_prob: 0.74
     cart_prob: 0.20
     purchase_prob: 0.10
-    session_searches: 6
+    session_searches: 4
 
   repeat_stable:
     ratio: 0.10
     preferred_categories: ["Ladieswear", "Menswear"]
     preferred_colors: ["Black", "White", "Grey"]
     price_sensitivity: medium
-    search_prob: 0.22
-    view_prob: 0.55
-    cart_prob: 0.34
-    purchase_prob: 0.28
-    session_searches: 2
+    search_prob: 0.30
+    view_prob: 0.62
+    cart_prob: 0.36
+    purchase_prob: 0.30
+    session_searches: 3
 
   color_focus:
     ratio: 0.10
     preferred_categories: ["Ladieswear", "Menswear", "Accessories"]
     preferred_colors: ["Black", "White", "Pink", "Blue"]
     price_sensitivity: medium
-    search_prob: 0.35
+    search_prob: 0.32
     view_prob: 0.70
     cart_prob: 0.26
     purchase_prob: 0.18
@@ -97,8 +97,8 @@ personas:
     preferred_categories: ["Ladieswear", "Menswear", "Sport"]
     preferred_colors: ["Black", "White", "Blue"]
     price_sensitivity: medium
-    search_prob: 0.30
+    search_prob: 0.26
     view_prob: 0.66
     cart_prob: 0.28
     purchase_prob: 0.20
-    session_searches: 3
+    session_searches: 2

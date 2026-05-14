@@ -143,3 +143,34 @@ python data_pipeline/build_candidate_training_data.py
 - `build_ranking_train_data.py` expects `customer_features.csv` and `articles_feature.csv` to exist first.
 - The ranking dataset is purchase-based and uses sampled negatives rather than impression logs.
 - `build_candidate_training_data.py` creates a positive-interaction dataset with richer aggregate user/item features for candidate retrieval training.
+
+## 2026-05-13 Persona & Simulation Update
+
+The data pipeline was updated so that persona scoring and simulation now align on the same 9-persona schema:
+- `trendsetter`
+- `practical`
+- `value`
+- `brand_loyal`
+- `impulse`
+- `careful`
+- `repeat_stable`
+- `color_focus`
+- `category_focus`
+
+Key changes:
+- `build_user_persona_scores.py` was rebalanced to reduce collapse into a few dominant personas and to keep rare personas usable
+- `build_item_persona_scores.py` was rebalanced so item-side top personas are less biased toward a narrow subset
+- `build_sim_users.py` and `build_simulated_events.py` now operate against the rebalanced persona outputs
+
+Validation summary:
+- `test` mode produced valid event logs with all 9 personas present
+- `dev` mode produced `200,000` simulated events
+- `simulated_events_validation_dev.json` confirmed:
+  - `missing_search_query_rows = 0`
+  - `missing_item_rows = 0`
+  - all 9 personas appeared in the final `active_persona` distribution
+
+Reference docs:
+- `docs/data_simulator_work_report_2026-05-13.md`
+- `docs/remaining_issues.txt`
+- `persona/*.md`

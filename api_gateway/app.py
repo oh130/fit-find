@@ -13,9 +13,12 @@ API Gateway — port 8000
 """
 
 import csv
+import hashlib
 import json
+import logging
 import os
 import re
+import traceback
 import httpx
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -135,6 +138,43 @@ class OnboardingRequest(BaseModel):
     budget_range: str | None = None  # "low" | "mid" | "high"
 
 
+QUERY_INTEREST_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Ladieswear": (
+        "women", "woman", "ladies", "dress", "skirt", "blouse", "jacket", "outer", "coat",
+        "여성", "여자", "원피스", "스커트", "블라우스", "자켓", "재킷", "아우터", "코트",
+    ),
+    "Menswear": (
+        "men", "man", "mens", "shirt", "suit", "jacket", "outer", "coat",
+        "남성", "남자", "셔츠", "정장", "자켓", "재킷", "아우터", "코트",
+    ),
+    "Divided": (
+        "denim", "jeans", "street", "casual", "청바지", "데님", "스트릿", "캐주얼",
+    ),
+    "Sport": (
+        "sport", "sports", "active", "training", "스포츠", "운동", "트레이닝",
+    ),
+    "Kids": (
+        "kids", "baby", "child", "키즈", "아동", "아이", "베이비",
+    ),
+    "Lingeries/Tights": (
+        "lingerie", "tights", "underwear", "속옷", "타이츠", "스타킹",
+    ),
+}
+QUERY_INTEREST_CATEGORIES = tuple(QUERY_INTEREST_KEYWORDS.keys())
+
+
+def _infer_session_interest_from_query_keywords(query_text: str | None) -> dict[str, int]:
+    if not query_text:
+        return {}
+
+    normalized_query = query_text.lower()
+    inferred: dict[str, int] = {}
+    for category, keywords in QUERY_INTEREST_KEYWORDS.items():
+        if any(keyword.lower() in normalized_query for keyword in keywords):
+            inferred[category] = inferred.get(category, 0) + 2
+    return inferred
+
+
 # ── 유틸: LLM 호출 ───────────────────────────────────────────
 
 async def _call_gemini(prompt: str, json_mode: bool = False) -> str:
@@ -142,6 +182,7 @@ async def _call_gemini(prompt: str, json_mode: bool = False) -> str:
 
     json_mode=True이면 JSON 외 출력을 차단해 파싱 안정성을 높인다.
     """
+    logging.warning("[GEMINI CALL] %s", "".join(traceback.format_stack()[-4:-1]))
     if not GEMINI_API_KEY:
         return ""
 
@@ -159,6 +200,73 @@ async def _call_gemini(prompt: str, json_mode: bool = False) -> str:
         )
         resp.raise_for_status()
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _coerce_interest_score(value: object) -> int:
+    try:
+        numeric_value = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(numeric_value, 3))
+
+
+def _parse_query_interest_payload(payload: object) -> dict[str, int]:
+    if not isinstance(payload, dict):
+        return {}
+
+    raw_interest = payload.get("interest", payload)
+    if not isinstance(raw_interest, dict):
+        return {}
+
+    normalized_by_key = {str(key).strip().lower(): value for key, value in raw_interest.items()}
+    inferred: dict[str, int] = {}
+    for category in QUERY_INTEREST_CATEGORIES:
+        score = _coerce_interest_score(normalized_by_key.get(category.lower()))
+        if score > 0:
+            inferred[category] = score
+    return inferred
+
+
+async def _infer_session_interest_from_query_llm(query_text: str) -> dict[str, int]:
+    if not GEMINI_API_KEY or not query_text.strip():
+        return {}
+
+    category_list = ", ".join(QUERY_INTEREST_CATEGORIES)
+    prompt = (
+        "Infer lightweight fashion recommendation interests from the search query.\n"
+        "Return only JSON. Use only these category keys: "
+        f"{category_list}.\n"
+        "Each score must be an integer from 0 to 3. Use 0 when unrelated. "
+        "Keep scores conservative because this is a short-lived search signal.\n\n"
+        f"Search query: {query_text}\n\n"
+        "JSON format:\n"
+        '{"interest":{"Ladieswear":0,"Menswear":0,"Divided":0,"Sport":0,"Kids":0,"Lingeries/Tights":0}}'
+    )
+
+    try:
+        llm_text = await _call_gemini(prompt, json_mode=True)
+        return _parse_query_interest_payload(json.loads(llm_text))
+    except Exception:
+        return {}
+
+
+async def _infer_session_interest_from_query(query_text: str | None) -> dict[str, int]:
+    normalized_query = (query_text or "").strip()
+    if not normalized_query:
+        return {}
+
+    cached_interest = feature_store.get_query_interest_cache(normalized_query)
+    if cached_interest is not None:
+        return {
+            category: _coerce_interest_score(score)
+            for category, score in cached_interest.items()
+            if category in QUERY_INTEREST_CATEGORIES and _coerce_interest_score(score) > 0
+        }
+
+    inferred_interest = _infer_session_interest_from_query_keywords(normalized_query)
+
+    feature_store.set_query_interest_cache(normalized_query, inferred_interest)
+    return inferred_interest
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────
@@ -231,24 +339,42 @@ async def search(req: SearchRequest):
 RECOMMEND_CACHE_TTL = 300  # 5분
 
 
+def _weight_cache_suffix(weight_params: dict[str, float | None]) -> str:
+    active_weights = {key: value for key, value in weight_params.items() if value is not None}
+    if not active_weights:
+        return ""
+    encoded = json.dumps(active_weights, sort_keys=True, separators=(",", ":"))
+    return f":{encoded}"
+
+
 @app.get("/api/recommend")
 async def recommend(
     user_id: str = Query(...),
     top_n: int = Query(10),
-    price_weight: float = Query(0.0),       # A: 가격 가중치 (0.0~1.0)
-    popularity_weight: float = Query(0.0),  # A: 인기도 가중치 (0.0~1.0)
-    include_reasons: bool = Query(False),   # B: LLM 추천 이유 포함 여부
+    price_weight: float | None = Query(None, ge=0.0, le=5.0),
+    popularity_weight: float | None = Query(None, ge=0.0, le=5.0),
+    diversity_weight: float | None = Query(None, ge=0.0, le=5.0),
+    freshness_weight: float | None = Query(None, ge=0.0, le=5.0),
+    exploration_weight: float | None = Query(None, ge=0.0, le=5.0),
+    include_reasons: bool = Query(False),
 ):
     """Redis 세션 데이터를 붙여 rec-models로 추천 요청을 프록시한다."""
     features = feature_store.get_user_features(user_id)
     click_count = features["click_count"]
+    weight_params = {
+        "price_weight": price_weight,
+        "popularity_weight": popularity_weight,
+        "diversity_weight": diversity_weight,
+        "freshness_weight": freshness_weight,
+        "exploration_weight": exploration_weight,
+    }
 
-    # include_reasons=True이면 LLM 결과가 붙으므로 캐시 우회
-    cache_key = f"cache:recommend:{user_id}:{top_n}:{click_count}:{price_weight}:{popularity_weight}"
-    if not include_reasons:
-        cached = feature_store.r.get(cache_key)
-        if cached:
-            return json.loads(cached)
+    # 캐시 키: include_reasons 여부에 따라 별도 키 사용
+    reasons_suffix = ":reasons" if include_reasons else ""
+    cache_key = f"cache:recommend:{user_id}:{top_n}:{click_count}{_weight_cache_suffix(weight_params)}{reasons_suffix}"
+    cached = feature_store.r.get(cache_key)
+    if cached:
+        return json.loads(cached)
 
     params = {
         "user_id": user_id,
@@ -256,9 +382,8 @@ async def recommend(
         "recent_clicks": ",".join(features["recent_clicks"]),
         "click_count": click_count,
         "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
-        "price_weight": price_weight,        # A: rec-models에 그대로 전달
-        "popularity_weight": popularity_weight,
     }
+    params.update({key: value for key, value in weight_params.items() if value is not None})
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
@@ -326,10 +451,25 @@ async def events(req: EventRequest):
     if req.event_type in ("click", "view", "cart", "purchase") and effective_id:
         feature_store.push_click(req.user_id, effective_id)
 
+    interest_changed = False
     if req.category:
         interest = feature_store.get_session_interest(req.user_id)
         interest[req.category] = interest.get(req.category, 0) + 1
         feature_store.set_session_interest(req.user_id, interest)
+        interest_changed = True
+
+    inferred_interest = {}
+    if req.event_type == "search":
+        inferred_interest = await _infer_session_interest_from_query(req.query_text)
+    if inferred_interest:
+        interest = feature_store.get_session_interest(req.user_id)
+        for category, score in inferred_interest.items():
+            interest[category] = interest.get(category, 0) + score
+        feature_store.set_session_interest(req.user_id, interest)
+        interest_changed = True
+
+    if interest_changed:
+        feature_store.invalidate_recommendation_cache(req.user_id)
 
     # rec-models 세션 업데이트 (실패해도 이벤트 저장은 성공으로 처리)
     if effective_id:
@@ -369,26 +509,47 @@ async def onboarding(req: OnboardingRequest):
         f"자유 입력: {req.description}\n"
         f"선호 스타일: {style_text}\n"
         f"예산 범위: {budget_text}\n\n"
-        f"아래 9개 패션 페르소나 각각과 이 사용자가 얼마나 일치하는지 퍼센티지로 추정해주세요.\n"
-        f"퍼센티지의 합은 반드시 100이 되어야 합니다.\n\n"
+        f"아래 9개 패션 페르소나 중 이 사용자에게 해당하는 것을 골라 퍼센티지를 배분해주세요.\n\n"
+        f"규칙 — 먼저 입력에서 페르소나와 연결되는 신호가 몇 개인지 파악하세요:\n"
+        f"[신호 1개] 예: '파란색만 좋아', '할인 상품만 산다'\n"
+        f"  → 해당 페르소나 70~85%, 나머지는 practical·careful·trendsetter 중 2~3개에 각각 5~15%씩 배분\n"
+        f"  → 보조 페르소나 하나가 20% 이상이 되면 안 됩니다\n"
+        f"[신호 2~3개] 예: '가성비 중시하고 붉은색 선호'\n"
+        f"  → 가장 강한 신호 40~50%, 나머지 신호들이 나머지를 나눔. 무관한 페르소나는 0%\n"
+        f"[신호 4개 이상 또는 모호] 예: '다양한 스타일을 즐기는 편'\n"
+        f"  → 관련 페르소나들에 고르게 배분\n"
+        f"- 합계는 반드시 100입니다.\n\n"
         f"페르소나 설명:\n"
         f"- trendsetter: 새로운 트렌드에 민감하고 다양한 스타일을 시도함\n"
         f"- practical: 실용적이고 목적 지향적인 구매, 기본 아이템 선호\n"
         f"- value: 가성비를 중시하고 세일/할인 상품을 적극 탐색\n"
-        f"- brand_loyal: 특정 카테고리나 스타일에 반복적으로 집중\n"
+        f"- brand_loyal: 특정 브랜드나 스타일에 반복적으로 집중\n"
         f"- impulse: 충동적으로 빠르게 구매 결정\n"
         f"- careful: 신중하게 오래 탐색하고 구매 전환율이 낮음\n"
         f"- repeat_stable: 동일한 상품이나 카테고리를 반복 구매\n"
-        f"- color_focus: 특정 색상 위주로 탐색\n"
-        f"- category_focus: 특정 카테고리에만 집중\n\n"
-        f"반드시 아래 JSON 형식으로만 응답하세요:\n"
-        f'{{"trendsetter": 30, "practical": 25, "value": 15, "brand_loyal": 10, '
-        f'"impulse": 5, "careful": 5, "repeat_stable": 5, "color_focus": 3, "category_focus": 2}}'
+        f"- color_focus: 특정 색상(예: 검정, 흰색, 파랑 등)을 기준으로 탐색, 색상 언급이 핵심 신호\n"
+        f"- category_focus: 특정 카테고리(예: 아우터, 운동복 등)에만 집중\n\n"
+        f"반드시 아래 JSON 키 이름 그대로, 숫자만 채워서 응답하세요 (합계 100):\n"
+        f'{{"trendsetter": ?, "practical": ?, "value": ?, "brand_loyal": ?, '
+        f'"impulse": ?, "careful": ?, "repeat_stable": ?, "color_focus": ?, "category_focus": ?}}'
     )
+
+    # 같은 입력이면 캐시에서 바로 반환 (불필요한 Gemini 재호출 방지)
+    cache_input = f"{req.description.strip().lower()}|{'|'.join(sorted(req.style_choices))}|{req.budget_range or ''}"
+    onboarding_cache_key = f"cache:onboarding:{hashlib.sha256(cache_input.encode('utf-8')).hexdigest()}"
+    cached = feature_store.r.get(onboarding_cache_key)
+    if cached:
+        cached_result = json.loads(cached)
+        feature_store.r.set(f"onboarding_scores:{req.user_id}", json.dumps(cached_result["persona_scores"]), ex=600)
+        return cached_result
 
     try:
         llm_text = await _call_gemini(prompt, json_mode=True)
         persona_scores: dict = json.loads(llm_text)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Gemini API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.")
+        raise HTTPException(status_code=500, detail=f"LLM 호출 실패: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM 응답 파싱 실패: {e}")
 
@@ -400,11 +561,20 @@ async def onboarding(req: OnboardingRequest):
         if k in valid_personas and isinstance(v, (int, float))
     }
 
-    # 합이 100이 되도록 정규화
+    # 합이 정확히 100이 되도록 정규화 (round 오차는 최댓값 항목에서 보정)
     total = sum(filtered.values())
-    normalized = {k: round(v * 100 / total) for k, v in filtered.items()} if total > 0 else filtered
+    if total == 0:
+        return {"persona_scores": filtered}
+    sorted_keys = sorted(filtered, key=filtered.get, reverse=True)
+    normalized = {k: round(filtered[k] * 100 / total) for k in sorted_keys}
+    diff = 100 - sum(normalized.values())
+    normalized[sorted_keys[0]] += diff
 
-    return {"persona_scores": normalized}
+    result = {"persona_scores": normalized}
+    feature_store.r.set(onboarding_cache_key, json.dumps(result), ex=3600)
+    # select 호출 시 혼합에 쓸 점수를 임시 저장 (10분)
+    feature_store.r.set(f"onboarding_scores:{req.user_id}", json.dumps(normalized), ex=600)
+    return result
 
 
 class PersonaSelectRequest(BaseModel):
@@ -438,8 +608,23 @@ async def onboarding_select(req: PersonaSelectRequest):
         "category_focus": {"Ladieswear": 10, "Menswear": 8},
     }
 
-    session_interest = persona_to_interest[req.persona]
+    # 온보딩 분석 점수가 있으면 가중 평균으로 혼합, 없으면 선택 페르소나 단독 사용
+    stored_raw = feature_store.r.get(f"onboarding_scores:{req.user_id}")
+    if stored_raw:
+        stored_scores: dict[str, int] = json.loads(stored_raw)
+        blended: dict[str, float] = {}
+        for persona, weight in stored_scores.items():
+            if weight <= 0 or persona not in persona_to_interest:
+                continue
+            for category, score in persona_to_interest[persona].items():
+                blended[category] = blended.get(category, 0) + score * (weight / 100.0)
+        session_interest = {k: round(v) for k, v in blended.items() if round(v) > 0}
+        feature_store.r.delete(f"onboarding_scores:{req.user_id}")
+    else:
+        session_interest = persona_to_interest[req.persona]
+
     feature_store.set_session_interest(req.user_id, session_interest)
+    feature_store.invalidate_recommendation_cache(req.user_id)
     return {"status": "ok", "persona": req.persona, "session_interest": session_interest}
 
 

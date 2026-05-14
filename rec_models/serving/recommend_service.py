@@ -66,6 +66,27 @@ def _random_seed_from_context(user_id: str, session_context: dict[str, Any]) -> 
     return hash((user_id, tuple(session_context["recent_clicks"][:5]), str(session_context["session_interest"]))) & 0xFFFFFFFF
 
 
+def _build_rerank_weights(
+    rerank_weights: dict[str, Any] | None = None,
+    *,
+    price_weight: float | None = None,
+    popularity_weight: float | None = None,
+    diversity_weight: float | None = None,
+    freshness_weight: float | None = None,
+    exploration_weight: float | None = None,
+) -> dict[str, Any] | None:
+    weights = dict(rerank_weights or {})
+    overrides = {
+        "price_weight": price_weight,
+        "popularity_weight": popularity_weight,
+        "diversity_weight": diversity_weight,
+        "freshness_weight": freshness_weight,
+        "exploration_weight": exploration_weight,
+    }
+    weights.update({key: value for key, value in overrides.items() if value is not None})
+    return weights or None
+
+
 def warmup_recommendation_assets() -> None:
     """Eagerly load heavy serving artifacts to reduce first-request latency."""
 
@@ -91,6 +112,7 @@ def rank_candidates_to_recommendations(
     enable_diversity: bool = True,
     enable_exploration: bool = True,
     enable_freshness: bool = True,
+    rerank_weights: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert candidate rows into final recommendations using serving ranking logic."""
 
@@ -103,6 +125,7 @@ def rank_candidates_to_recommendations(
             enable_diversity=enable_diversity,
             enable_exploration=enable_exploration,
             enable_freshness=enable_freshness,
+            rerank_weights=rerank_weights,
         )
 
     try:
@@ -122,6 +145,7 @@ def rank_candidates_to_recommendations(
         enable_diversity=enable_diversity,
         enable_exploration=enable_exploration,
         enable_freshness=enable_freshness,
+        rerank_weights=rerank_weights,
     )
 
 
@@ -131,6 +155,12 @@ def recommend(
     recent_clicks: list[str] | None = None,
     click_count: int = 0,
     session_interest: dict[str, Any] | None = None,
+    rerank_weights: dict[str, Any] | None = None,
+    price_weight: float | None = None,
+    popularity_weight: float | None = None,
+    diversity_weight: float | None = None,
+    freshness_weight: float | None = None,
+    exploration_weight: float | None = None,
 ) -> dict[str, Any]:
     """Run candidate generation, ranking, and reranking for one user."""
 
@@ -139,6 +169,14 @@ def recommend(
         "recent_clicks": recent_clicks or [],
         "session_interest": session_interest or None,
     }
+    effective_rerank_weights = _build_rerank_weights(
+        rerank_weights,
+        price_weight=price_weight,
+        popularity_weight=popularity_weight,
+        diversity_weight=diversity_weight,
+        freshness_weight=freshness_weight,
+        exploration_weight=exploration_weight,
+    )
 
     candidate_start = time.perf_counter()
     candidate_items = generate_candidates(
@@ -166,6 +204,7 @@ def recommend(
         scored_candidates=scored_candidates,
         top_n=top_n,
         random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
+        rerank_weights=effective_rerank_weights,
     )
     reranking_ms = _elapsed_ms(reranking_start)
     total_ms = _elapsed_ms(total_start)

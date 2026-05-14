@@ -76,6 +76,21 @@ OUTPUT_COLUMNS.extend(["top_persona", "top_persona_ratio"])
 
 UNKNOWN_VALUE = "UNKNOWN"
 NEUTRAL_COLORS = {"black", "white", "grey", "gray", "beige"}
+ACCENT_COLORS = {"pink", "red", "orange", "yellow", "green", "purple", "turquoise"}
+SPECIALIZED_CATEGORY_KEYWORDS = {
+    "accessories",
+    "lingerie",
+    "tights",
+    "sport",
+    "kids",
+    "baby",
+    "divided",
+    "underwear",
+    "swimwear",
+    "nightwear",
+    "socks",
+}
+LOYAL_DEPARTMENT_KEYWORDS = {"divided", "young", "trend", "denim", "sport", "studio", "modern classic"}
 
 
 def configure_logging() -> None:
@@ -115,6 +130,11 @@ def parse_bool_text(raw_value: str) -> bool:
 
 def known_score(value: str) -> float:
     return 0.0 if normalize_text(value) == UNKNOWN_VALUE else 1.0
+
+
+def contains_keyword(value: str, keywords: set[str]) -> bool:
+    normalized = normalize_text(value).lower()
+    return any(keyword in normalized for keyword in keywords)
 
 
 def minmax_normalize(value: float, min_value: float, max_value: float) -> float:
@@ -164,71 +184,79 @@ def compute_scores(row: dict[str, str], ranges: Dict[str, tuple[float, float]]) 
 
     solid_score = 1.0 if appearance == "solid" else 0.0
     neutral_color_score = 1.0 if color in NEUTRAL_COLORS else 0.0
+    accent_color_score = 1.0 if color in ACCENT_COLORS else 0.0
     color_known_score = known_score(row.get("colour_group_name", ""))
     perceived_color_known_score = known_score(perceived_color)
     department_known_score = known_score(department_name)
-    category_known_score = (known_score(category_l1) + known_score(category_l2) + known_score(category_l3)) / 3.0
-    product_type_known_score = known_score(product_type_name)
     low_price_score = 1.0 if price_bucket == "low" else 0.0
-    mid_price_score = 1.0 if price_bucket == "mid" else 0.0
     high_price_score = 1.0 if price_bucket == "high" else 0.0
     low_mid_price_score = 1.0 if price_bucket in {"low", "mid"} else 0.0
     mid_high_price_score = 1.0 if price_bucket in {"mid", "high"} else 0.0
+    low_price_norm = 1.0 - price_mean_norm
     older_item_score = item_age_days_norm
     core_apparel_score = 0.0 if "accessories" in product_group_name else 1.0
+    specialized_category_score = 1.0 if any(
+        contains_keyword(value, SPECIALIZED_CATEGORY_KEYWORDS)
+        for value in (category_l1, category_l2, category_l3, product_group_name, product_type_name)
+    ) else 0.20
+    product_group_specificity_score = 1.0 if specialized_category_score >= 1.0 else 0.35
+    department_identity_score = 1.0 if contains_keyword(department_name, LOYAL_DEPARTMENT_KEYWORDS) else 0.35
+    mainstream_color_score = 1.0 if color_known_score and not accent_color_score else 0.0
 
     scores = {
         "trendsetter": (
             0.45 * (1.0 if is_trendy else 0.0)
             + 0.25 * (1.0 if is_new_item else 0.0)
             + 0.20 * popularity_norm
-            + 0.10 * mid_high_price_score
+            + 0.10 * accent_color_score
         ),
         "practical": (
-            0.35 * (1.0 if is_basic else 0.0)
-            + 0.30 * solid_score
+            0.30 * (1.0 if is_basic else 0.0)
+            + 0.25 * solid_score
             + 0.20 * neutral_color_score
             + 0.15 * low_mid_price_score
+            + 0.10 * core_apparel_score
         ),
         "value": (
-            0.60 * low_price_score
-            + 0.25 * (1.0 if is_basic else 0.0)
-            + 0.15 * popularity_norm
+            0.45 * low_price_score
+            + 0.20 * low_price_norm
+            + 0.20 * popularity_norm
+            + 0.15 * (1.0 if is_basic else 0.0)
         ),
         "brand_loyal": (
-            0.45 * department_known_score
-            + 0.25 * category_known_score
+            0.40 * department_identity_score
+            + 0.20 * department_known_score
             + 0.20 * popularity_norm
-            + 0.10 * mid_high_price_score
+            + 0.20 * mid_high_price_score
         ),
         "impulse": (
             0.35 * popularity_norm
-            + 0.30 * (1.0 if is_new_item else 0.0)
+            + 0.25 * (1.0 if is_new_item else 0.0)
             + 0.20 * (1.0 if is_trendy else 0.0)
-            + 0.15 * low_mid_price_score
+            + 0.20 * accent_color_score
         ),
         "careful": (
             0.35 * mid_high_price_score
-            + 0.25 * category_known_score
+            + 0.25 * older_item_score
             + 0.20 * popularity_norm
-            + 0.20 * older_item_score
+            + 0.20 * core_apparel_score
         ),
         "repeat_stable": (
-            0.40 * (1.0 if is_basic else 0.0)
-            + 0.30 * solid_score
+            0.35 * (1.0 if is_basic else 0.0)
+            + 0.25 * solid_score
             + 0.20 * popularity_norm
-            + 0.10 * low_mid_price_score
+            + 0.20 * low_mid_price_score
         ),
         "color_focus": (
-            0.60 * solid_score
-            + 0.25 * color_known_score
-            + 0.15 * perceived_color_known_score
+            0.45 * accent_color_score
+            + 0.25 * solid_score
+            + 0.20 * perceived_color_known_score
+            + 0.10 * mainstream_color_score
         ),
         "category_focus": (
-            0.35 * category_known_score
-            + 0.25 * product_type_known_score
-            + 0.25 * core_apparel_score
-            + 0.15 * department_known_score
+            0.50 * specialized_category_score
+            + 0.30 * product_group_specificity_score
+            + 0.20 * department_identity_score
         ),
     }
     return scores
@@ -249,6 +277,7 @@ def write_output(rows: list[dict[str, str]], output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows_written = 0
+    persona_counts = {persona_name: 0 for persona_name in PERSONAS}
 
     with output_path.open("w", newline="", encoding="utf-8") as outfile:
         writer = csv.DictWriter(outfile, fieldnames=OUTPUT_COLUMNS)
@@ -269,6 +298,7 @@ def write_output(rows: list[dict[str, str]], output_path: Path) -> None:
             output_row["top_persona_ratio"] = f"{ratios[top_persona]:.6f}"
             writer.writerow(output_row)
             rows_written += 1
+            persona_counts[top_persona] += 1
 
     elapsed = time.perf_counter() - start_time
     logging.info(
@@ -276,6 +306,13 @@ def write_output(rows: list[dict[str, str]], output_path: Path) -> None:
         output_path,
         rows_written,
         elapsed,
+    )
+    logging.info(
+        "item_persona_top_distribution=%s",
+        ", ".join(
+            f"{persona_name}:{persona_counts[persona_name]}"
+            for persona_name in sorted(persona_counts, key=persona_counts.get, reverse=True)
+        ),
     )
 
 

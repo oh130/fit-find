@@ -251,6 +251,8 @@ function App() {
   const isManagingHistoryRef = useRef(false);
 
   const popularityWeight = 100 - recommendationWeight;
+  const pricePriorityWeight = recommendationWeight / 50;
+  const popularityPriorityWeight = popularityWeight / 50;
   const budgetLabel = `${Number(budget || 0).toLocaleString("ko-KR")}원`;
 
   const helperMessage = useMemo(() => {
@@ -262,6 +264,11 @@ function App() {
     }
     return "텍스트와 이미지 신호를 함께 반영해 더 강한 후보를 우선 정렬합니다.";
   }, [searchMode]);
+
+  useEffect(() => {
+    setPersonaScores({});
+    setOnboardingError(null);
+  }, [onboardingDescription, selectedStyles, budgetRange]);
 
   useEffect(() => {
     if (!isRegistered || showOnboarding) {
@@ -277,8 +284,8 @@ function App() {
       try {
         const bundle = await fetchRecommendations(userId.trim() || "anonymous", topN, recommendationSeed, {
           personaHint: selectedOnboardingPersona,
-          priceWeight: recommendationWeight / 100,
-          popularityWeight: popularityWeight / 100,
+          priceWeight: pricePriorityWeight,
+          popularityWeight: popularityPriorityWeight,
           includeReasons: true,
         });
 
@@ -311,6 +318,8 @@ function App() {
     selectedOnboardingPersona,
     recommendationWeight,
     popularityWeight,
+    pricePriorityWeight,
+    popularityPriorityWeight,
   ]);
 
   useEffect(() => {
@@ -394,6 +403,19 @@ function App() {
       } else {
         setResults(baseResults[nextMode]);
         setActiveLatency(baseResults[nextMode][0]?.responseTime ?? "128ms");
+      }
+
+      if (isRegistered && trimmedQuery) {
+        try {
+          await sendInteractionEvent({
+            userId: userId.trim() || "anonymous",
+            eventType: "search",
+            queryText: trimmedQuery,
+          });
+          setRecommendationSeed((current) => current + 1);
+        } catch {
+          // Search results should remain visible even if personalization logging fails.
+        }
       }
     } catch {
       setResults(baseResults[nextMode]);
@@ -499,7 +521,8 @@ function App() {
         persona: selectedOnboardingPersona,
       });
       setShowOnboarding(false);
-      setRecommendationSeed(0);
+      setBudgetSets(emptyBudgetSetBundle);
+      setRecommendationSeed((current) => current + 1);
     } catch {
       setOnboardingError("선택한 페르소나를 저장하지 못했습니다.");
     } finally {

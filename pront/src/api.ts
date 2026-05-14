@@ -385,9 +385,10 @@ export async function fetchSearchResults(params: {
 
 export async function sendInteractionEvent(input: {
   userId: string;
-  itemId: number | string;
-  eventType?: "click" | "purchase";
+  itemId?: number | string;
+  eventType?: "click" | "purchase" | "view" | "cart" | "search";
   category?: string;
+  queryText?: string;
 }): Promise<void> {
   await fetch(buildApiUrl("/api/events"), {
     method: "POST",
@@ -396,9 +397,10 @@ export async function sendInteractionEvent(input: {
     },
     body: JSON.stringify({
       user_id: input.userId,
-      item_id: String(input.itemId),
+      item_id: input.itemId === undefined ? null : String(input.itemId),
       event_type: input.eventType ?? "click",
       category: input.category ?? null,
+      query_text: input.queryText ?? null,
     }),
   });
 }

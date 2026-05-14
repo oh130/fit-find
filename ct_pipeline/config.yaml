@@ -4,6 +4,7 @@ thresholds:
   Coverage@50: 0.20
   Recall@300: 0.30
   auc: 0.70
+  latency_p95_ms: 200.0
 
 retrain_trigger:
   new_log_count: 10000
@@ -12,5 +13,9 @@ redis:
   host: localhost
   port: 6379
 
-metrics_path: ../rec_models/reports/baseline/baseline_metrics.json
+metrics_paths:
+  candidate: ../rec_models/reports/candidate_experiments/dev_spec_candidate_twotower.json
+  ranking: ../rec_models/reports/ranking_experiments/dev_spec_ranking_persona.json
+  recommendation: ../rec_models/reports/baseline/dev_spec_e2e_persona_optimized.json
+  latency: ../rec_models/reports/baseline/dev_spec_latency_persona_optimized.json
 version_path: ./version.txt

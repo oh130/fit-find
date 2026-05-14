@@ -60,6 +60,20 @@
 GET /api/recommend?user_id=U1234&top_n=10
 ```
 
+추천 우선순위 조절 파라미터를 함께 전달할 수 있다. 범위는 `0.0`~`5.0`이며, 미전달 또는 `1.0`은 기본 추천 정책과 동일하다.
+
+- `price_weight`: 높을수록 낮은 가격 상품을 더 선호
+- `popularity_weight`: 높을수록 인기 상품 쏠림을 더 강하게 완화
+- `diversity_weight`: 높을수록 카테고리 다양성 강화
+- `freshness_weight`: 높을수록 신상품 boost 강화
+- `exploration_weight`: 높을수록 MAB/coverage exploration 슬롯 강화
+
+예시:
+
+```
+GET /api/recommend?user_id=U1234&top_n=10&price_weight=1.5&diversity_weight=2.0
+```
+
 ```json
 // 응답
 {
