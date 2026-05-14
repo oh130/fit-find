@@ -256,6 +256,7 @@ rec_models/reports/diagnostics/
 rec_models/reports/reranking_experiments/
 rec_models/reports/ranking_experiments/2026-05-03_*.json
 rec_models/reports/ranking_experiments/2026-05-04_*.json
+rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest*.json
 
 # Accidental root npm lockfile
 /package-lock.json
