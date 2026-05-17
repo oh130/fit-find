@@ -9,6 +9,9 @@ __pycache__/
 checkpoints/*
 !checkpoints/ranking_baseline.joblib
 !checkpoints/ranking_baseline_metadata.json
+!checkpoints/logreg_dev/
+!checkpoints/logreg_dev/ranking_baseline.joblib
+!checkpoints/logreg_dev/ranking_baseline_metadata.json
 
 data/*
 !data/processed/

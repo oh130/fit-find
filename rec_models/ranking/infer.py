@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +29,31 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
+DEFAULT_CHECKPOINT_BASE_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
 PIPELINE_ARTIFACT_NAME = "ranking_baseline.joblib"
 METADATA_ARTIFACT_NAME = "ranking_baseline_metadata.json"
 DEEPFM_ARTIFACT_NAME = "ranking_deepfm.pt"
 DEEPFM_METADATA_ARTIFACT_NAME = "ranking_deepfm_metadata.json"
+DEFAULT_LOGREG_DEV_CHECKPOINT_DIR = DEFAULT_CHECKPOINT_BASE_DIR / "logreg_dev"
+
+
+def _checkpoint_artifacts_exist(checkpoint_dir: Path) -> bool:
+    return (
+        (checkpoint_dir / PIPELINE_ARTIFACT_NAME).exists()
+        and (checkpoint_dir / METADATA_ARTIFACT_NAME).exists()
+    )
+
+
+def _resolve_default_checkpoint_dir() -> Path:
+    configured_path = os.getenv("RANKING_CHECKPOINT_DIR")
+    if configured_path:
+        return Path(configured_path)
+    if _checkpoint_artifacts_exist(DEFAULT_LOGREG_DEV_CHECKPOINT_DIR):
+        return DEFAULT_LOGREG_DEV_CHECKPOINT_DIR
+    return DEFAULT_CHECKPOINT_BASE_DIR
+
+
+DEFAULT_CHECKPOINT_DIR = _resolve_default_checkpoint_dir()
 
 
 def configure_logging(verbose: bool = False) -> None:

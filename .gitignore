@@ -256,7 +256,15 @@ rec_models/reports/diagnostics/
 rec_models/reports/reranking_experiments/
 rec_models/reports/ranking_experiments/2026-05-03_*.json
 rec_models/reports/ranking_experiments/2026-05-04_*.json
-rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest*.json
+rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_user_split_*.json
+
+# Final dev recommendation reports are small and used by the summary docs.
+!rec_models/reports/candidate_experiments/dev_two_tower_persona_latest_1000.json
+!rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_1000.json
+!rec_models/reports/baseline/dev_e2e_persona_latest_1000.json
+!rec_models/reports/baseline/dev_e2e_persona_latest_baseline_compare_1000.json
+!rec_models/reports/baseline/dev_e2e_persona_latest_5000.json
+!rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json
 
 # Accidental root npm lockfile
 /package-lock.json

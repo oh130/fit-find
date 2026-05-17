@@ -164,7 +164,8 @@ Request
 ### Docker 단독 실행
 
 - `rec_models`는 단독 Docker 서비스로 실행할 수 있습니다.
-- 현재 Docker 이미지에는 FastAPI 서버와 서빙에 필요한 모델/데이터 artifact가 포함됩니다.
+- Docker 이미지에는 FastAPI 서버와 `rec_models/checkpoints/logreg_dev` ranking artifact를 포함할 수 있습니다.
+- Two-Tower candidate artifact는 repo-root `data/checkpoints` 아래에 두고 `/app/data`로 마운트하는 실행 방식을 기준으로 합니다.
 
 ## 3. 디렉토리 구조
 
@@ -213,10 +214,12 @@ rec_models/
 
 학습된 모델 artifact와 metadata를 저장합니다.
 
-- `ranking_baseline.joblib`
-  - 서빙에 사용하는 baseline ranking pipeline
-- `ranking_baseline_metadata.json`
-  - ranking pipeline과 함께 사용하는 feature metadata
+- `logreg_dev/ranking_baseline.joblib`
+  - 최종 서빙에 사용하는 LogReg CTR ranking pipeline
+- `logreg_dev/ranking_baseline_metadata.json`
+  - 최종 ranking pipeline과 함께 사용하는 feature metadata
+- `ranking_baseline.joblib`, `ranking_baseline_metadata.json`
+  - 이전 baseline fallback artifact
 - `two_tower.pt`
   - Two-Tower candidate 모델 checkpoint
 - `deepfm.pt`
@@ -253,6 +256,35 @@ pip install -r rec_models/requirements.txt
 python -m uvicorn rec_models.app:app --host 0.0.0.0 --port 8003
 ```
 
+로컬 실행 전 최종 서빙 artifact가 있어야 합니다.
+
+```text
+rec_models/checkpoints/logreg_dev/ranking_baseline.joblib
+rec_models/checkpoints/logreg_dev/ranking_baseline_metadata.json
+data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt
+data/checkpoints/candidate_dev_history_itemid_fast/two_tower_metadata.json
+```
+
+Ranking checkpoint는 `RANKING_CHECKPOINT_DIR` 환경변수가 있으면 그 경로를 사용하고, 없으면 `rec_models/checkpoints/logreg_dev`를 우선 사용합니다. Candidate checkpoint는 `TWO_TOWER_CHECKPOINT_DIR` 환경변수가 있으면 그 경로를 사용하고, 없으면 `data/checkpoints/candidate_dev_history_itemid_fast`를 우선 사용합니다.
+
+artifact가 없다면 팀 공유 산출물을 위 경로에 배치하거나, dev 데이터 기준으로 아래 순서대로 생성합니다.
+
+```bash
+DATA_PIPELINE_MODE=dev .venv/bin/python data_pipeline/run_data_pipeline.py
+
+.venv/bin/python -m rec_models.candidate.train \
+  --data data/processed/candidate_train_data_dev.csv.gz \
+  --epochs 2 \
+  --batch-size 1024 \
+  --validation-max-users 1000 \
+  --checkpoint-dir data/checkpoints/candidate_dev_history_itemid_fast
+
+.venv/bin/python -m rec_models.ranking.train \
+  --model-type logreg \
+  --split-mode user \
+  --output-dir rec_models/checkpoints/logreg_dev
+```
+
 서버 주소:
 
 ```text
@@ -272,8 +304,10 @@ http://localhost:8003/docs
 ```bash
 cd /home/jiwon/projects/multimodal-search-engine
 docker build -t rec-models ./rec_models
-docker run --rm -p 8003:8003 rec-models
+docker run --rm -p 8003:8003 -v "$PWD/data:/app/data:ro" rec-models
 ```
+
+Docker build context는 `./rec_models`이므로 `rec_models/checkpoints/logreg_dev`에 최신 ranking artifact가 있으면 이미지에 포함됩니다. Candidate Two-Tower artifact는 repo-root `data/checkpoints/candidate_dev_history_itemid_fast`에 둔 뒤 위처럼 `/app/data`로 마운트합니다. 전체 `docker-compose.yml` 실행도 같은 `/app/data` 마운트를 사용합니다.
 
 실행 후 접속 주소:
 
@@ -449,23 +483,35 @@ CLI는 다음 결과를 함께 출력합니다.
 
 ### 최종 dev 기준 결과
 
-최신 dev mode 기준 추천 모델은 명세 지표를 통과했습니다.
+최신 dev mode 기준 추천 모델은 명세 지표를 통과했습니다. 아래 값은 2026-05-13 생성 dev 데이터와 9개 페르소나 score 기준으로 2026-05-14 재학습/재평가한 결과입니다.
 
 | 항목 | 기준 | 결과 | 판정 |
 |---|---:|---:|---|
-| Candidate Recall@300 | >= 0.30 | 0.614632 | 통과 |
-| Ranking AUC | >= 0.70 | 0.956739 | 통과 |
-| HitRate@50 | >= 0.20 | 0.497000 | 통과 |
-| NDCG@50 | >= 0.08 | 0.178138 | 통과 |
-| Coverage@50 | >= 0.20 | 0.215203 | 통과 |
-| Serving latency p95 | <= 200ms | 187.61ms | 통과 |
+| Candidate Recall@300 | >= 0.30 | 0.602922 | 통과 |
+| Ranking AUC | >= 0.70 | 0.960505 | 통과 |
+| HitRate@50 | >= 0.20 | 0.491000 | 통과 |
+| NDCG@50 | >= 0.08 | 0.177184 | 통과 |
+| Coverage@50 | >= 0.20 | 0.214607 | 통과 |
+| Serving latency p95 | <= 200ms | 162.23ms | 통과 |
+
+동일 1000 유저 기준 popularity baseline 대비 개선폭:
+
+| 항목 | Current Model | Popularity Baseline | Improvement |
+|---|---:|---:|---:|
+| HitRate@50 | 0.491000 | 0.405000 | +0.086000 |
+| NDCG@50 | 0.177184 | 0.068926 | +0.108258 |
+| Coverage@50 | 0.214228 | 0.015075 | +0.199153 |
+
+5000명 확대 평가에서도 HitRate@50 `0.480800`, NDCG@50 `0.173457`, Coverage@50 `0.536535`로 명세를 통과했습니다.
 
 주요 결과 파일:
 
-- `rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json`
-- `rec_models/reports/ranking_experiments/dev_ranking_logreg.json`
-- `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json`
-- `rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json`
+- `rec_models/reports/candidate_experiments/dev_two_tower_persona_latest_1000.json`
+- `rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_1000.json`
+- `rec_models/reports/baseline/dev_e2e_persona_latest_1000.json`
+- `rec_models/reports/baseline/dev_e2e_persona_latest_baseline_compare_1000.json`
+- `rec_models/reports/baseline/dev_e2e_persona_latest_5000.json`
+- `rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json`
 
 ## 7. 현재 한계
 
