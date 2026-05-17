@@ -54,16 +54,45 @@ LOGGER = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CANDIDATE_CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints" / "candidate"
 DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints" / "candidate_dev_history_itemid_fast"
+DEFAULT_DEV_HISTORY_LOLO_CHECKPOINT_DIR = BASE_DIR / "data" / "checkpoints" / "candidate_dev_history_lolo_fast"
 DEFAULT_MODEL_ARTIFACT = "two_tower.pt"
 DEFAULT_TOP_K = 300
+
+
+def _checkpoint_artifact_exists(checkpoint_dir: Path) -> bool:
+    return (checkpoint_dir.expanduser() / DEFAULT_MODEL_ARTIFACT).exists()
 
 
 def _resolve_default_checkpoint_dir() -> Path:
     configured_path = os.getenv("TWO_TOWER_CHECKPOINT_DIR")
     if configured_path:
-        return Path(configured_path)
-    if (DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR / DEFAULT_MODEL_ARTIFACT).exists():
-        return DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR
+        configured_dir = Path(configured_path)
+        if _checkpoint_artifact_exists(configured_dir):
+            return configured_dir
+
+        for fallback_dir in (
+            DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR,
+            DEFAULT_DEV_HISTORY_LOLO_CHECKPOINT_DIR,
+            DEFAULT_CANDIDATE_CHECKPOINT_DIR,
+        ):
+            if _checkpoint_artifact_exists(fallback_dir):
+                LOGGER.warning(
+                    "TWO_TOWER_CHECKPOINT_DIR=%s does not contain %s; falling back to %s",
+                    configured_dir,
+                    DEFAULT_MODEL_ARTIFACT,
+                    fallback_dir,
+                )
+                return fallback_dir
+
+        return configured_dir
+
+    for fallback_dir in (
+        DEFAULT_DEV_HISTORY_ITEMID_CHECKPOINT_DIR,
+        DEFAULT_DEV_HISTORY_LOLO_CHECKPOINT_DIR,
+        DEFAULT_CANDIDATE_CHECKPOINT_DIR,
+    ):
+        if _checkpoint_artifact_exists(fallback_dir):
+            return fallback_dir
     return DEFAULT_CANDIDATE_CHECKPOINT_DIR
 
 

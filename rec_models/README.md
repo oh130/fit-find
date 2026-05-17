@@ -265,7 +265,7 @@ data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt
 data/checkpoints/candidate_dev_history_itemid_fast/two_tower_metadata.json
 ```
 
-Ranking checkpoint는 `RANKING_CHECKPOINT_DIR` 환경변수가 있으면 그 경로를 사용하고, 없으면 `rec_models/checkpoints/logreg_dev`를 우선 사용합니다. Candidate checkpoint는 `TWO_TOWER_CHECKPOINT_DIR` 환경변수가 있으면 그 경로를 사용하고, 없으면 `data/checkpoints/candidate_dev_history_itemid_fast`를 우선 사용합니다.
+Ranking checkpoint는 `RANKING_CHECKPOINT_DIR` 환경변수 경로에 artifact가 있으면 그 경로를 사용합니다. 없으면 `rec_models/checkpoints/logreg_dev`, `rec_models/checkpoints` 순서로 fallback합니다. Candidate checkpoint는 `TWO_TOWER_CHECKPOINT_DIR` 환경변수 경로에 `two_tower.pt`가 있으면 그 경로를 사용합니다. 없으면 `data/checkpoints/candidate_dev_history_itemid_fast`, `data/checkpoints/candidate_dev_history_lolo_fast`, `data/checkpoints/candidate` 순서로 fallback합니다.
 
 artifact가 없다면 팀 공유 산출물을 위 경로에 배치하거나, dev 데이터 기준으로 아래 순서대로 생성합니다.
 
@@ -307,7 +307,7 @@ docker build -t rec-models ./rec_models
 docker run --rm -p 8003:8003 -v "$PWD/data:/app/data:ro" rec-models
 ```
 
-Docker build context는 `./rec_models`이므로 `rec_models/checkpoints/logreg_dev`에 최신 ranking artifact가 있으면 이미지에 포함됩니다. Candidate Two-Tower artifact는 repo-root `data/checkpoints/candidate_dev_history_itemid_fast`에 둔 뒤 위처럼 `/app/data`로 마운트합니다. 전체 `docker-compose.yml` 실행도 같은 `/app/data` 마운트를 사용합니다.
+Docker build context는 `./rec_models`이므로 `rec_models/checkpoints/logreg_dev`에 최신 ranking artifact가 있으면 이미지에 포함됩니다. 해당 dev artifact가 없으면 `rec_models/checkpoints`의 root ranking artifact로 fallback합니다. Candidate Two-Tower artifact는 repo-root `data/checkpoints/candidate_dev_history_itemid_fast`에 둔 뒤 위처럼 `/app/data`로 마운트합니다. 해당 경로가 없으면 `candidate_dev_history_lolo_fast`, `candidate` 순서로 fallback합니다. 전체 `docker-compose.yml` 실행도 같은 `/app/data` 마운트를 사용합니다.
 
 실행 후 접속 주소:
 

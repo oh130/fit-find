@@ -27,8 +27,10 @@
 
 - Candidate checkpoint:
   - `data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt`
+  - fallback: `data/checkpoints/candidate_dev_history_lolo_fast/two_tower.pt`, `data/checkpoints/candidate/two_tower.pt`
 - Ranking checkpoint:
   - `rec_models/checkpoints/logreg_dev/ranking_baseline.joblib`
+  - fallback: `rec_models/checkpoints/ranking_baseline.joblib`
 - Serving candidate pool:
   - top-50 요청 기준 75개 후보를 생성해 ranking/reranking에 전달
 - Reranking:

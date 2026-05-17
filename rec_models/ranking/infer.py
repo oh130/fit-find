@@ -38,6 +38,7 @@ DEFAULT_LOGREG_DEV_CHECKPOINT_DIR = DEFAULT_CHECKPOINT_BASE_DIR / "logreg_dev"
 
 
 def _checkpoint_artifacts_exist(checkpoint_dir: Path) -> bool:
+    checkpoint_dir = checkpoint_dir.expanduser()
     return (
         (checkpoint_dir / PIPELINE_ARTIFACT_NAME).exists()
         and (checkpoint_dir / METADATA_ARTIFACT_NAME).exists()
@@ -47,9 +48,24 @@ def _checkpoint_artifacts_exist(checkpoint_dir: Path) -> bool:
 def _resolve_default_checkpoint_dir() -> Path:
     configured_path = os.getenv("RANKING_CHECKPOINT_DIR")
     if configured_path:
-        return Path(configured_path)
-    if _checkpoint_artifacts_exist(DEFAULT_LOGREG_DEV_CHECKPOINT_DIR):
-        return DEFAULT_LOGREG_DEV_CHECKPOINT_DIR
+        configured_dir = Path(configured_path)
+        if _checkpoint_artifacts_exist(configured_dir):
+            return configured_dir
+
+        for fallback_dir in (DEFAULT_LOGREG_DEV_CHECKPOINT_DIR, DEFAULT_CHECKPOINT_BASE_DIR):
+            if _checkpoint_artifacts_exist(fallback_dir):
+                LOGGER.warning(
+                    "RANKING_CHECKPOINT_DIR=%s does not contain required artifacts; falling back to %s",
+                    configured_dir,
+                    fallback_dir,
+                )
+                return fallback_dir
+
+        return configured_dir
+
+    for fallback_dir in (DEFAULT_LOGREG_DEV_CHECKPOINT_DIR, DEFAULT_CHECKPOINT_BASE_DIR):
+        if _checkpoint_artifacts_exist(fallback_dir):
+            return fallback_dir
     return DEFAULT_CHECKPOINT_BASE_DIR
 
 
