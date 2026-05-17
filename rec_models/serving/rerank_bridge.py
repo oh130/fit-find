@@ -16,9 +16,10 @@ DEFAULT_EXPLORATION_RATIO = 0.6
 DEFAULT_MAX_EXPLORATION_SLOTS = 30
 DEFAULT_NEW_ITEM_WINDOW_DAYS = 7
 DEFAULT_SOFT_DIVERSITY_PENALTY = 0.003
-DEFAULT_SOFT_POPULARITY_PENALTY = 0.004
+DEFAULT_SOFT_LONG_TAIL_PENALTY = 0.004
 DEFAULT_SOFT_FRESHNESS_BOOST = 0.002
 DEFAULT_SOFT_PRICE_PENALTY = 0.002
+DEFAULT_PERSONALIZATION_BLEND_STRENGTH = 0.035
 DEFAULT_SCORE_GAP_GUARD = 0.01
 MAX_RERANK_WEIGHT = 5.0
 
@@ -35,7 +36,9 @@ class RerankWeights:
     diversity: float = 1.0
     exploration: float = 1.0
     freshness: float = 1.0
-    popularity: float = 1.0
+    personalization: float = 1.0
+    popularity: float = 0.0
+    long_tail: float = 1.0
     price: float = 1.0
 
 
@@ -57,14 +60,22 @@ def normalize_rerank_weights(weights: Mapping[str, Any] | RerankWeights | None =
 
     raw = dict(weights or {})
 
-    def pick(short_key: str) -> float:
-        return _coerce_weight(raw.get(f"{short_key}_weight", raw.get(short_key)), default=1.0)
+    def pick(short_key: str, default: float = 1.0) -> float:
+        return _coerce_weight(raw.get(f"{short_key}_weight", raw.get(short_key)), default=default)
+
+    # Backward compatibility: older callers used popularity_weight as a
+    # long-tail pressure. The frontend now uses it as an actual popularity
+    # preference, so keep the old pressure only when no popularity override is
+    # provided.
+    explicit_popularity = "popularity_weight" in raw or "popularity" in raw
 
     return RerankWeights(
         diversity=pick("diversity"),
         exploration=pick("exploration"),
         freshness=pick("freshness"),
-        popularity=pick("popularity"),
+        personalization=pick("personalization"),
+        popularity=pick("popularity", default=0.0),
+        long_tail=pick("long_tail", default=0.0 if explicit_popularity else 1.0),
         price=pick("price"),
     )
 
@@ -167,13 +178,24 @@ def apply_soft_greedy_rerank(
     pool["category_rank"] = pool.groupby("category_key", sort=False).cumcount()
     pool["soft_score"] = pool["base_score"]
 
+    if weights.personalization > 0 or weights.popularity > 0:
+        base_norm = _normalize_series(pool["base_score"])
+        preference_total = max(weights.personalization + weights.popularity, 1e-9)
+        preference_score = (
+            (base_norm * weights.personalization)
+            + (pool["popularity_norm"] * weights.popularity)
+        ) / preference_total
+        pool["soft_score"] = pool["soft_score"] + (
+            (preference_score - base_norm) * DEFAULT_PERSONALIZATION_BLEND_STRENGTH
+        )
+
     if enable_diversity:
         diversity_penalty = DEFAULT_SOFT_DIVERSITY_PENALTY * weights.diversity
         pool["soft_score"] = pool["soft_score"] - (pool["category_rank"] * diversity_penalty)
 
-    if enable_exploration:
-        popularity_penalty = DEFAULT_SOFT_POPULARITY_PENALTY * weights.popularity
-        pool["soft_score"] = pool["soft_score"] - (pool["popularity_norm"] * popularity_penalty)
+    if enable_exploration and weights.long_tail > 0:
+        long_tail_penalty = DEFAULT_SOFT_LONG_TAIL_PENALTY * weights.long_tail
+        pool["soft_score"] = pool["soft_score"] - (pool["popularity_norm"] * long_tail_penalty)
 
     if weights.price > 1.0:
         price_pressure = DEFAULT_SOFT_PRICE_PENALTY * (weights.price - 1.0)
@@ -237,6 +259,16 @@ def _image_url_for_article(article_id: str) -> str:
     return f"/api/images/{article_id}"
 
 
+def _display_scores(raw_scores: pd.Series) -> list[float]:
+    """Scale final raw scores for UI display while preserving rank ratios."""
+
+    scores = pd.to_numeric(raw_scores, errors="coerce").fillna(0.0).clip(lower=0.0)
+    max_score = float(scores.max()) if not scores.empty else 0.0
+    if max_score <= 0.0:
+        return [0.0 for _ in range(len(scores))]
+    return (scores / max_score).clip(upper=1.0).astype(float).tolist()
+
+
 def select_exploration_candidates(
     remaining_candidates: pd.DataFrame,
     already_selected: pd.DataFrame,
@@ -293,7 +325,8 @@ def select_exploration_candidates(
         candidates["exploration_score"] = (
             candidates["score_norm"] * 0.25
             - candidates["category_penalty"] * (0.20 * weights.diversity)
-            - candidates["popularity_norm"] * (0.25 * weights.popularity)
+            - candidates["popularity_norm"] * (0.25 * weights.long_tail)
+            + candidates["popularity_norm"] * (0.20 * weights.popularity)
             - candidates["price_norm"] * price_pressure
             + candidates["coverage_exploration_flag"] * (2.00 * weights.exploration)
             + freshness_mask.astype(float) * (0.30 * weights.freshness)
@@ -446,13 +479,15 @@ def rerank_recommendations(
     else:
         final_ranked = combined.head(effective_top_n).copy()
 
+    display_scores = _display_scores(final_ranked.get("score", pd.Series(0.0, index=final_ranked.index)))
+
     recommendations: list[dict[str, Any]] = []
-    for row in final_ranked.to_dict(orient="records"):
+    for row, display_score in zip(final_ranked.to_dict(orient="records"), display_scores, strict=False):
         product_id = str(row.get("article_id", ""))
         recommendations.append(
             {
                 "product_id": product_id,
-                "score": float(row.get("score", 0.0)),
+                "score": display_score,
                 "reason": _pick_reason(row),
                 "is_exploration": bool(row.get("is_exploration", False)),
                 "image_url": _image_url_for_article(product_id),

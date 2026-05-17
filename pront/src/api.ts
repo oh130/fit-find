@@ -37,6 +37,18 @@ export type SearchItem = {
   imageUrl?: string;
 };
 
+export type PersonalizedSearchBundle = {
+  similarity: {
+    items: SearchItem[];
+    responseTime: string;
+  };
+  personalized: {
+    items: SearchItem[];
+    responseTime: string;
+    persona: string;
+  };
+};
+
 export type BudgetSetItem = {
   id: number;
   title: string;
@@ -138,6 +150,19 @@ type ApiSearchResponse =
     }
   | ApiSearchItem[];
 
+type ApiPersonalizedSearchResponse = {
+  search_results?: ApiSearchItem[];
+  personalized_results?: ApiRecommendationItem[];
+  search_latency_ms?: number;
+  personalized_latency?: {
+    candidate_ms?: number;
+    ranking_ms?: number;
+    reranking_ms?: number;
+    total_ms?: number;
+  };
+  persona?: string;
+};
+
 type ApiBudgetSetItem = {
   article_id?: number | string;
   product_id?: number | string;
@@ -173,6 +198,51 @@ function buildApiUrl(path: string): string {
   }
 
   return `${baseUrl.replace(/\/$/, "")}${path}`;
+}
+
+function formatApiDetail(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "msg" in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join(", ");
+  }
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+  return "";
+}
+
+async function buildApiErrorMessage(response: Response, fallback: string): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text) {
+    return `${fallback} (${response.status})`;
+  }
+
+  try {
+    const payload = JSON.parse(text) as {
+      detail?: unknown;
+      message?: unknown;
+      error?: unknown;
+    };
+    const detail =
+      formatApiDetail(payload.detail) ||
+      formatApiDetail(payload.message) ||
+      formatApiDetail(payload.error);
+    return detail ? `${fallback} (${response.status}): ${detail}` : `${fallback} (${response.status})`;
+  } catch {
+    return `${fallback} (${response.status}): ${text.slice(0, 240)}`;
+  }
 }
 
 function toCurrencyLabel(value: string | number | undefined): string {
@@ -296,6 +366,28 @@ function normalizeSearchItems(
   };
 }
 
+function normalizePersonalizedSearchItems(
+  rawItems: ApiRecommendationItem[],
+  responseTime: string,
+  persona: string,
+): SearchItem[] {
+  return rawItems.map((item, index) => ({
+    id: toNumericId(item.id, item.item_id, item.product_id),
+    title: item.title ?? item.name ?? `Personalized Result ${index + 1}`,
+    brand: item.brand ?? "Unknown Brand",
+    price: toCurrencyLabel(item.price),
+    similarity: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
+    searchType: "내 취향순",
+    responseTime,
+    summary:
+      item.reason_text ??
+      item.reason ??
+      `${persona} 신호와 현재 검색 후보를 함께 반영한 재정렬 결과입니다.`,
+    accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
+    imageUrl: toImageUrl(item),
+  }));
+}
+
 function normalizeBudgetSetBundle(payload: ApiBudgetSetResponse): BudgetSetBundle {
   const sets = (payload.sets ?? []).map((setItems, setIndex) =>
     setItems.map((item, itemIndex) => ({
@@ -324,6 +416,7 @@ export async function fetchRecommendations(
   _seed: number,
   options?: {
     personaHint?: string;
+    personalizationWeight?: number;
     priceWeight?: number;
     popularityWeight?: number;
     includeReasons?: boolean;
@@ -332,6 +425,12 @@ export async function fetchRecommendations(
   const url = new URL(buildApiUrl("/api/recommend"), window.location.origin);
   url.searchParams.set("user_id", userId);
   url.searchParams.set("top_n", String(topN));
+  if (options?.personaHint) {
+    url.searchParams.set("persona_hint", options.personaHint);
+  }
+  if (options?.personalizationWeight !== undefined) {
+    url.searchParams.set("personalization_weight", options.personalizationWeight.toFixed(2));
+  }
   if (options?.priceWeight !== undefined) {
     url.searchParams.set("price_weight", options.priceWeight.toFixed(2));
   }
@@ -349,7 +448,7 @@ export async function fetchRecommendations(
   });
 
   if (!response.ok) {
-    throw new Error(`Recommendation API failed with ${response.status}`);
+    throw new Error(await buildApiErrorMessage(response, "추천 API 호출 실패"));
   }
 
   const payload = (await response.json()) as ApiRecommendationResponse;
@@ -376,11 +475,63 @@ export async function fetchSearchResults(params: {
   });
 
   if (!response.ok) {
-    throw new Error(`Search API failed with ${response.status}`);
+    throw new Error(await buildApiErrorMessage(response, "검색 API 호출 실패"));
   }
 
   const payload = (await response.json()) as ApiSearchResponse;
   return normalizeSearchItems(payload, params.mode);
+}
+
+export async function fetchPersonalizedSearchResults(params: {
+  userId: string;
+  query: string;
+  imageBase64?: string | null;
+  topK: number;
+  topN: number;
+  mode: "text" | "image" | "multimodal";
+  personaHint?: string | null;
+}): Promise<PersonalizedSearchBundle> {
+  const response = await fetch(buildApiUrl("/api/personalized-search"), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      user_id: params.userId,
+      query: params.query,
+      image_base64: params.imageBase64 ?? null,
+      top_k: params.topK,
+      top_n: params.topN,
+      persona_hint: params.personaHint ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await buildApiErrorMessage(response, "개인화 검색 API 호출 실패"));
+  }
+
+  const payload = (await response.json()) as ApiPersonalizedSearchResponse;
+  const searchPayload: ApiSearchResponse = {
+    results: payload.search_results ?? [],
+    latency_ms: payload.search_latency_ms,
+  };
+  const similarity = normalizeSearchItems(searchPayload, params.mode);
+  const personalizedResponseTime = toLatencyLabel(payload.personalized_latency?.total_ms, "0ms");
+  const persona = payload.persona ?? "개인화 검색";
+
+  return {
+    similarity,
+    personalized: {
+      items: normalizePersonalizedSearchItems(
+        payload.personalized_results ?? [],
+        personalizedResponseTime,
+        persona,
+      ),
+      responseTime: personalizedResponseTime,
+      persona,
+    },
+  };
 }
 
 export async function sendInteractionEvent(input: {
@@ -436,6 +587,7 @@ export async function fetchOnboardingPersonaScores(input: {
 export async function selectOnboardingPersona(input: {
   userId: string;
   persona: string;
+  personaScores?: OnboardingPersonaScores;
 }): Promise<void> {
   const response = await fetch(buildApiUrl("/api/onboarding/select"), {
     method: "POST",
@@ -446,6 +598,7 @@ export async function selectOnboardingPersona(input: {
     body: JSON.stringify({
       user_id: input.userId,
       persona: input.persona,
+      persona_scores: input.personaScores ?? null,
     }),
   });
 

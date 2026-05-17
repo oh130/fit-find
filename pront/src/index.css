@@ -211,6 +211,15 @@ button {
   font-weight: 800;
 }
 
+.search-tabs button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.result-tabs {
+  margin-bottom: 16px;
+}
+
 .search-box,
 .user-id-field {
   display: grid;
@@ -258,7 +267,8 @@ button {
 .stage-chip,
 .weight-panel,
 .persona-card,
-.persona-option {
+.persona-option,
+.empty-state {
   border-radius: 22px;
   border: 1px solid rgba(17, 17, 17, 0.08);
   background: #ffffff;
@@ -289,7 +299,8 @@ button {
 .search-hint,
 .persona-summary,
 .weight-copy p:last-child,
-.stage-chip span {
+.stage-chip span,
+.empty-state p {
   color: #5a5a5a;
 }
 
@@ -439,6 +450,15 @@ button {
 .recommendation-list {
   display: grid;
   gap: 14px;
+}
+
+.empty-state {
+  padding: 22px;
+}
+
+.empty-state p {
+  margin: 0;
+  max-width: 64ch;
 }
 
 .stage-list {

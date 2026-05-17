@@ -3,6 +3,7 @@ API Gateway — port 8000
 
 엔드포인트:
   POST /api/search             search-engine 프록시
+  POST /api/personalized-search search 후보를 rec-models로 개인화 재정렬
   GET  /api/recommend          Redis 세션 붙여서 rec-models 프록시
   POST /api/events             Redis에 클릭/구매 이벤트 저장
   GET  /api/features/{user_id} Redis 유저 피처 조회
@@ -52,8 +53,13 @@ _ITEM_FEATURES_CANDIDATES = [
 PRICE_KRW_FACTOR = 1_000_000
 
 feature_store: RedisFeatureStore
-# article_id → {name, category, color, product_type, price}
+# article_id → {name, brand, category, color, product_type, price}
 article_meta: dict[str, dict] = {}
+
+
+def _brand_label(department_name: str | None) -> str:
+    department = (department_name or "").strip()
+    return f"H&M · {department}" if department else "H&M"
 
 
 def _load_article_meta() -> dict[str, dict]:
@@ -64,27 +70,30 @@ def _load_article_meta() -> dict[str, dict]:
         for row in csv.DictReader(f):
             aid = row.get("article_id", "").strip()
             if aid:
+                department_name = row.get("department_name", "")
                 meta[aid] = {
                     "name": row.get("prod_name", ""),
+                    "brand": _brand_label(department_name),
                     "category": row.get("category", ""),
                     "color": row.get("color", ""),
                     "product_type": row.get("product_type_name", ""),
                     "price": 0,
                 }
 
-    # item_features CSV에서 avg_price 보강
+    # item_features CSV에서 avg_price 보강. dev/test/prod 산출물의 포함
+    # item이 다를 수 있으므로 첫 파일에서 멈추지 않고 가능한 값을 합친다.
     for path in _ITEM_FEATURES_CANDIDATES:
         if path.exists():
             with path.open(encoding="utf-8") as f:
                 for row in csv.DictReader(f):
                     aid = row.get("article_id", "").strip()
-                    if aid in meta:
+                    if aid in meta and not meta[aid]["price"]:
                         try:
                             raw = float(row.get("avg_price", 0) or 0)
-                            meta[aid]["price"] = int(raw * PRICE_KRW_FACTOR)
+                            if raw > 0:
+                                meta[aid]["price"] = int(raw * PRICE_KRW_FACTOR)
                         except (ValueError, TypeError):
                             pass
-            break  # 첫 번째로 발견된 파일만 사용
 
     return meta
 
@@ -115,6 +124,12 @@ class SearchRequest(BaseModel):
     top_k: int = 10
 
 
+class PersonalizedSearchRequest(SearchRequest):
+    user_id: str
+    top_n: int = 10
+    persona_hint: str | None = None
+
+
 class EventRequest(BaseModel):
     user_id: str
     article_id: str | None = None
@@ -129,6 +144,76 @@ class OnboardingRequest(BaseModel):
     description: str  # 자유 입력 (예: "미니멀한 스타일 좋아하는 20대 여성입니다")
     style_choices: list[str] = []  # 선택지 (예: ["casual", "minimal", "sporty"])
     budget_range: str | None = None  # "low" | "mid" | "high"
+
+
+VALID_PERSONAS = (
+    "trendsetter", "practical", "value", "brand_loyal", "impulse",
+    "careful", "repeat_stable", "color_focus", "category_focus",
+)
+
+
+def _normalize_persona_scores(persona_scores: dict[str, int | float]) -> dict[str, int]:
+    filtered = {
+        key: max(0, int(value))
+        for key, value in persona_scores.items()
+        if key in VALID_PERSONAS and isinstance(value, (int, float))
+    }
+    total = sum(filtered.values())
+    if total == 0:
+        return {"practical": 35, "careful": 25, "value": 20, "trendsetter": 20}
+
+    sorted_keys = sorted(filtered, key=filtered.get, reverse=True)
+    normalized = {key: round(filtered[key] * 100 / total) for key in sorted_keys}
+    diff = 100 - sum(normalized.values())
+    normalized[sorted_keys[0]] += diff
+    return normalized
+
+
+def _fallback_persona_scores(req: OnboardingRequest) -> dict[str, int]:
+    """Deterministic local persona inference for quota/network fallback."""
+
+    text = " ".join([req.description, " ".join(req.style_choices), req.budget_range or ""]).lower()
+    scores = {persona: 0 for persona in VALID_PERSONAS}
+
+    keyword_rules = {
+        "value": ("가성비", "할인", "세일", "저렴", "가격", "budget", "cheap", "sale", "low"),
+        "practical": ("실용", "기본", "출근", "편한", "활용", "minimal", "classic", "daily"),
+        "careful": ("신중", "비교", "리뷰", "고민", "오래", "compare", "review"),
+        "trendsetter": ("트렌드", "유행", "새로운", "힙", "street", "trend", "new"),
+        "impulse": ("충동", "바로", "즉흥", "눈에 띄", "impulse"),
+        "brand_loyal": ("브랜드", "brand", "익숙", "선호 브랜드"),
+        "repeat_stable": ("반복", "재구매", "비슷한", "꾸준", "stable", "repeat"),
+        "color_focus": ("색", "컬러", "검정", "블랙", "화이트", "파랑", "빨강", "color", "black", "white"),
+        "category_focus": ("아우터", "자켓", "재킷", "니트", "셔츠", "원피스", "운동복", "outer", "jacket", "knit", "dress"),
+    }
+    for persona, keywords in keyword_rules.items():
+        scores[persona] += sum(18 for keyword in keywords if keyword in text)
+
+    if req.budget_range == "low":
+        scores["value"] += 30
+    elif req.budget_range == "mid":
+        scores["practical"] += 18
+        scores["careful"] += 12
+    elif req.budget_range == "high":
+        scores["brand_loyal"] += 18
+        scores["trendsetter"] += 12
+
+    for style in req.style_choices:
+        style_key = style.lower()
+        if style_key in {"minimal", "classic", "casual"}:
+            scores["practical"] += 14
+            scores["careful"] += 8
+        elif style_key == "street":
+            scores["trendsetter"] += 18
+            scores["impulse"] += 8
+        elif style_key == "sporty":
+            scores["practical"] += 12
+            scores["trendsetter"] += 8
+        elif style_key == "feminine":
+            scores["trendsetter"] += 8
+            scores["color_focus"] += 8
+
+    return _normalize_persona_scores(scores)
 
 
 QUERY_INTEREST_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -281,6 +366,47 @@ async def _translate_to_english(query: str) -> str:
         return query
 
 
+def _enrich_search_results(items: list[dict]) -> list[dict]:
+    enriched_results = []
+    for item in items:
+        pid = str(item.get("product_id", ""))
+        meta = article_meta.get(pid, {})
+        enriched_results.append({
+            **item,
+            "name": meta.get("name") or item.get("name") or pid,
+            "brand": meta.get("brand") or "H&M",
+            "category": meta.get("category", item.get("category", "")),
+            "color": meta.get("color", ""),
+            "product_type": meta.get("product_type", ""),
+            "price": meta.get("price", 0),
+        })
+    return enriched_results
+
+
+def _enrich_recommendation_results(items: list[dict]) -> list[dict]:
+    enriched_results = []
+    for rank, item in enumerate(items, 1):
+        pid = str(item.get("product_id", ""))
+        meta = article_meta.get(pid, {})
+        enriched_results.append({
+            **item,
+            "rank": rank,
+            "name": meta.get("name") or pid,
+            "brand": meta.get("brand") or "H&M",
+            "category": meta.get("category", ""),
+            "color": meta.get("color", ""),
+            "product_type": meta.get("product_type", ""),
+            "price": meta.get("price", 0),
+        })
+    return enriched_results
+
+
+def _top_persona_from_scores(persona_scores: dict[str, int] | None) -> str | None:
+    if not persona_scores:
+        return None
+    return max(persona_scores, key=persona_scores.get)
+
+
 @app.post("/api/search")
 async def search(req: SearchRequest):
     """search-engine으로 검색 요청을 프록시한다.
@@ -306,20 +432,7 @@ async def search(req: SearchRequest):
 
     result = resp.json()
 
-    # 상품명/카테고리/가격 enrichment
-    enriched_results = []
-    for item in result.get("results", []):
-        pid = str(item.get("product_id", ""))
-        meta = article_meta.get(pid, {})
-        enriched_results.append({
-            **item,
-            "name": meta.get("name") or item.get("name") or pid,
-            "category": meta.get("category", item.get("category", "")),
-            "color": meta.get("color", ""),
-            "product_type": meta.get("product_type", ""),
-            "price": meta.get("price", 0),
-        })
-    result["results"] = enriched_results
+    result["results"] = _enrich_search_results(result.get("results", []))
 
     if translated_query:
         result["original_query"] = req.query
@@ -328,10 +441,102 @@ async def search(req: SearchRequest):
     return result
 
 
+PERSONALIZED_SEARCH_CANDIDATE_POOL = 80
+
+
+@app.post("/api/personalized-search")
+async def personalized_search(req: PersonalizedSearchRequest):
+    """Search broadly, then return both similarity order and personalized order."""
+
+    top_n = max(1, min(int(req.top_n), 100))
+    search_top_k = max(top_n, int(req.top_k), PERSONALIZED_SEARCH_CANDIDATE_POOL)
+    translated_query: str | None = None
+    search_payload = {
+        "query": req.query,
+        "image_base64": req.image_base64,
+        "top_k": search_top_k,
+    }
+
+    if req.query and _has_korean(req.query) and GEMINI_API_KEY:
+        translated_query = await _translate_to_english(req.query)
+        search_payload["query"] = translated_query
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            search_resp = await client.post(f"{SEARCH_URL}/search", json=search_payload)
+            search_resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"search-engine 연결 실패: {e}")
+
+    search_result = search_resp.json()
+    enriched_search_results = _enrich_search_results(search_result.get("results", []))
+
+    inferred_interest = await _infer_session_interest_from_query(req.query)
+    if inferred_interest:
+        interest = feature_store.get_session_interest(req.user_id)
+        for category, score in inferred_interest.items():
+            interest[category] = interest.get(category, 0) + score
+        feature_store.set_session_interest(req.user_id, interest)
+        feature_store.invalidate_recommendation_cache(req.user_id)
+
+    features = feature_store.get_user_features(req.user_id)
+    raw_persona_scores = features.get("persona_scores", {})
+    persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
+    persona_hint = req.persona_hint or _top_persona_from_scores(persona_scores)
+    rerank_payload = {
+        "user_id": req.user_id,
+        "top_n": top_n,
+        "search_candidates": [
+            {
+                "product_id": str(item.get("product_id", "")),
+                "score": item.get("score", item.get("similarity")),
+            }
+            for item in enriched_search_results
+            if item.get("product_id") is not None
+        ],
+        "recent_clicks": features["recent_clicks"],
+        "session_interest": features["session_interest"] or None,
+        "persona_hint": persona_hint,
+        "persona_scores": persona_scores or None,
+        "include_recommendation_candidates": False,
+        "recommendation_candidate_pool_size": PERSONALIZED_SEARCH_CANDIDATE_POOL,
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            rerank_resp = await client.post(f"{REC_URL}/rerank-candidates", json=rerank_payload)
+            rerank_resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
+
+    personalized_result = rerank_resp.json()
+    personalized_results = _enrich_recommendation_results(personalized_result.get("recommendations", []))
+    pipeline_latency = personalized_result.get("pipeline_latency", {})
+
+    response = {
+        "search_results": enriched_search_results[:top_n],
+        "personalized_results": personalized_results,
+        "search_latency_ms": search_result.get("latency_ms", search_result.get("total_ms")),
+        "personalized_latency": pipeline_latency,
+        "candidate_summary": personalized_result.get("candidate_summary", {}),
+        "session_interest": features["session_interest"],
+        "persona": personalized_result.get("persona", persona_hint or "personalized"),
+        "persona_scores": persona_scores,
+    }
+    if translated_query:
+        response["original_query"] = req.query
+        response["translated_query"] = translated_query
+    return response
+
+
 RECOMMEND_CACHE_TTL = 300  # 5분
 
 
-def _weight_cache_suffix(weight_params: dict[str, float | None]) -> str:
+def _weight_cache_suffix(weight_params: dict[str, object]) -> str:
     active_weights = {key: value for key, value in weight_params.items() if value is not None}
     if not active_weights:
         return ""
@@ -343,22 +548,31 @@ def _weight_cache_suffix(weight_params: dict[str, float | None]) -> str:
 async def recommend(
     user_id: str = Query(...),
     top_n: int = Query(10),
+    persona_hint: str | None = Query(None),
+    personalization_weight: float | None = Query(None, ge=0.0, le=5.0),
     price_weight: float | None = Query(None, ge=0.0, le=5.0),
     popularity_weight: float | None = Query(None, ge=0.0, le=5.0),
     diversity_weight: float | None = Query(None, ge=0.0, le=5.0),
     freshness_weight: float | None = Query(None, ge=0.0, le=5.0),
     exploration_weight: float | None = Query(None, ge=0.0, le=5.0),
+    long_tail_weight: float | None = Query(None, ge=0.0, le=5.0),
     include_reasons: bool = Query(False),
 ):
     """Redis 세션 데이터를 붙여 rec-models로 추천 요청을 프록시한다."""
     features = feature_store.get_user_features(user_id)
     click_count = features["click_count"]
+    raw_persona_scores = features.get("persona_scores", {})
+    persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
     weight_params = {
+        "persona_hint": persona_hint,
+        "persona_scores": persona_scores or None,
+        "personalization_weight": personalization_weight,
         "price_weight": price_weight,
         "popularity_weight": popularity_weight,
         "diversity_weight": diversity_weight,
         "freshness_weight": freshness_weight,
         "exploration_weight": exploration_weight,
+        "long_tail_weight": long_tail_weight,
     }
 
     # 캐시 키: include_reasons 여부에 따라 별도 키 사용
@@ -374,8 +588,13 @@ async def recommend(
         "recent_clicks": ",".join(features["recent_clicks"]),
         "click_count": click_count,
         "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
+        "persona_scores": json.dumps(persona_scores) if persona_scores else None,
     }
-    params.update({key: value for key, value in weight_params.items() if value is not None})
+    params.update({
+        key: value
+        for key, value in weight_params.items()
+        if value is not None and key != "persona_scores"
+    })
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
@@ -401,6 +620,7 @@ async def recommend(
             **item,
             "rank": i,
             "name": meta.get("name") or pid,
+            "brand": meta.get("brand") or "H&M",
             "category": meta.get("category", ""),
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
@@ -489,9 +709,6 @@ async def onboarding(req: OnboardingRequest):
     프론트엔드가 결과를 블록으로 보여주고 유저가 하나를 선택하면
     /api/onboarding/select를 호출해 확정한다.
     """
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY not configured")
-
     style_text = ", ".join(req.style_choices) if req.style_choices else "없음"
     budget_text = {"low": "저가", "mid": "중간 가격대", "high": "고가"}.get(req.budget_range or "", "무관")
 
@@ -534,32 +751,18 @@ async def onboarding(req: OnboardingRequest):
         feature_store.r.set(f"onboarding_scores:{req.user_id}", json.dumps(cached_result["persona_scores"]), ex=600)
         return cached_result
 
-    try:
-        llm_text = await _call_gemini(prompt, json_mode=True)
-        persona_scores: dict = json.loads(llm_text)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            raise HTTPException(status_code=429, detail="Gemini API 사용량 한도를 초과했습니다. 잠시 후 다시 시도해 주세요.")
-        raise HTTPException(status_code=500, detail=f"LLM 호출 실패: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM 응답 파싱 실패: {e}")
-
-    valid_personas = {"trendsetter", "practical", "value", "brand_loyal", "impulse",
-                      "careful", "repeat_stable", "color_focus", "category_focus"}
-    filtered = {
-        k: max(0, int(v))
-        for k, v in persona_scores.items()
-        if k in valid_personas and isinstance(v, (int, float))
-    }
-
-    # 합이 정확히 100이 되도록 정규화 (round 오차는 최댓값 항목에서 보정)
-    total = sum(filtered.values())
-    if total == 0:
-        return {"persona_scores": filtered}
-    sorted_keys = sorted(filtered, key=filtered.get, reverse=True)
-    normalized = {k: round(filtered[k] * 100 / total) for k in sorted_keys}
-    diff = 100 - sum(normalized.values())
-    normalized[sorted_keys[0]] += diff
+    if GEMINI_API_KEY:
+        try:
+            llm_text = await _call_gemini(prompt, json_mode=True)
+            normalized = _normalize_persona_scores(json.loads(llm_text))
+        except httpx.HTTPStatusError as e:
+            logging.warning("Gemini onboarding failed with status=%s. Using local fallback.", e.response.status_code)
+            normalized = _fallback_persona_scores(req)
+        except Exception:
+            logging.exception("Gemini onboarding failed. Using local fallback.")
+            normalized = _fallback_persona_scores(req)
+    else:
+        normalized = _fallback_persona_scores(req)
 
     result = {"persona_scores": normalized}
     feature_store.r.set(onboarding_cache_key, json.dumps(result), ex=3600)
@@ -571,6 +774,7 @@ async def onboarding(req: OnboardingRequest):
 class PersonaSelectRequest(BaseModel):
     user_id: str
     persona: str  # 9개 중 유저가 선택한 페르소나
+    persona_scores: dict[str, int | float] | None = None
 
 
 @app.post("/api/onboarding/select")
@@ -599,24 +803,36 @@ async def onboarding_select(req: PersonaSelectRequest):
         "category_focus": {"Ladieswear": 10, "Menswear": 8},
     }
 
-    # 온보딩 분석 점수가 있으면 가중 평균으로 혼합, 없으면 선택 페르소나 단독 사용
+    # 프론트가 보낸 최신 분석 점수를 우선 사용하고, 없으면 임시 Redis 캐시를 사용한다.
+    selected_only_scores = {req.persona: 100}
+    stored_scores = selected_only_scores
+    if req.persona_scores:
+        stored_scores = _normalize_persona_scores(req.persona_scores)
+
     stored_raw = feature_store.r.get(f"onboarding_scores:{req.user_id}")
-    if stored_raw:
-        stored_scores: dict[str, int] = json.loads(stored_raw)
-        blended: dict[str, float] = {}
-        for persona, weight in stored_scores.items():
-            if weight <= 0 or persona not in persona_to_interest:
-                continue
-            for category, score in persona_to_interest[persona].items():
-                blended[category] = blended.get(category, 0) + score * (weight / 100.0)
-        session_interest = {k: round(v) for k, v in blended.items() if round(v) > 0}
-        feature_store.r.delete(f"onboarding_scores:{req.user_id}")
-    else:
+    if stored_raw and not req.persona_scores:
+        stored_scores = _normalize_persona_scores(json.loads(stored_raw))
+
+    blended: dict[str, float] = {}
+    for persona, weight in stored_scores.items():
+        if weight <= 0 or persona not in persona_to_interest:
+            continue
+        for category, score in persona_to_interest[persona].items():
+            blended[category] = blended.get(category, 0) + score * (weight / 100.0)
+    session_interest = {key: round(value) for key, value in blended.items() if round(value) > 0}
+    if not session_interest:
         session_interest = persona_to_interest[req.persona]
 
+    feature_store.set_persona_scores(req.user_id, stored_scores)
+    feature_store.r.delete(f"onboarding_scores:{req.user_id}")
     feature_store.set_session_interest(req.user_id, session_interest)
     feature_store.invalidate_recommendation_cache(req.user_id)
-    return {"status": "ok", "persona": req.persona, "session_interest": session_interest}
+    return {
+        "status": "ok",
+        "persona": req.persona,
+        "persona_scores": stored_scores,
+        "session_interest": session_interest,
+    }
 
 
 @app.post("/api/budget-set")
@@ -632,12 +848,15 @@ async def budget_set(
     search-engine에 /cross-similarity가 미구현 상태라면 score 기반 그리디로 대체한다.
     """
     features = feature_store.get_user_features(user_id)
+    raw_persona_scores = features.get("persona_scores", {})
+    persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
     params = {
         "user_id": user_id,
         "top_n": 50,
         "recent_clicks": ",".join(features["recent_clicks"]),
         "click_count": features["click_count"],
         "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
+        "persona_scores": json.dumps(persona_scores) if persona_scores else None,
     }
 
     async with httpx.AsyncClient(timeout=10.0) as client:

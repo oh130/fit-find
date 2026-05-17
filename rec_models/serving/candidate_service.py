@@ -579,6 +579,45 @@ def _materialize_candidates(
     return frame.reset_index(drop=True)
 
 
+def materialize_external_candidates(
+    candidate_ids: list[Any],
+    candidate_scores: dict[str, float] | None = None,
+    *,
+    feature_store: ServingFeatureStore | None = None,
+    candidate_reason: str = "external_candidate",
+) -> pd.DataFrame:
+    """Convert externally retrieved article ids into ranking-ready candidates."""
+
+    feature_store = feature_store or get_cached_feature_store()
+    selected_ids: list[str] = []
+    materialized_scores: dict[str, float] = {}
+    seen_ids: set[str] = set()
+    raw_scores = candidate_scores or {}
+
+    for rank, raw_article_id in enumerate(candidate_ids, start=1):
+        article_id = normalize_article_id(raw_article_id)
+        if article_id in seen_ids or article_id not in feature_store.candidate_frame.index:
+            continue
+
+        seen_ids.add(article_id)
+        selected_ids.append(article_id)
+        raw_score = raw_scores.get(str(raw_article_id), raw_scores.get(article_id))
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            score = max(0.01, 1.0 / float(rank))
+        materialized_scores[article_id] = score
+
+    return _materialize_candidates(
+        selected_ids=selected_ids,
+        feature_store=feature_store,
+        candidate_scores=materialized_scores,
+        recent_matches={},
+        session_matches={},
+        candidate_reason=candidate_reason,
+    )
+
+
 def _cold_start_candidates(
     feature_store: ServingFeatureStore,
     recent_click_set: set[str],
