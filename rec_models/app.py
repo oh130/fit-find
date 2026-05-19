@@ -10,12 +10,14 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 
 try:
+    from rec_models.serving.bandit_store import get_bandit_store
     from rec_models.serving.recommend_service import (
         recommend,
         rerank_external_candidates,
         warmup_recommendation_assets,
     )
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from serving.bandit_store import get_bandit_store  # type: ignore[no-redef]
     from serving.recommend_service import (  # type: ignore[no-redef]
         recommend,
         rerank_external_candidates,
@@ -29,7 +31,9 @@ app = FastAPI(title="Recommendation Models Service")
 
 class SessionUpdateRequest(BaseModel):
     user_id: str
-    item_id: str
+    item_id: str | None = None
+    article_id: str | None = None
+    product_id: str | None = None
     event: str
 
 
@@ -169,14 +173,22 @@ def rerank_candidates_endpoint(req: RerankCandidatesRequest) -> dict[str, Any]:
 
 
 @app.post("/session/update")
-def session_update(_: SessionUpdateRequest) -> dict[str, str]:
-    """Placeholder endpoint for session-event integration.
+def session_update(req: SessionUpdateRequest) -> dict[str, Any]:
+    """Apply session reward feedback for reward-aware exploration."""
 
-    TODO: Persist session updates inside rec_models once a dedicated session
-    feature backend is introduced.
-    """
-
-    return {"status": "ok"}
+    article_id = req.article_id or req.product_id or req.item_id
+    reward_result = get_bandit_store().record_reward(
+        user_id=req.user_id,
+        article_id=article_id,
+        event=req.event,
+    )
+    return {
+        "status": "ok",
+        "bandit_updated": reward_result.updated,
+        "article_id": reward_result.article_id,
+        "event": reward_result.event,
+        "reward": reward_result.reward,
+    }
 
 
 @app.get("/health")

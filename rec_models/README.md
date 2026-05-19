@@ -114,7 +114,8 @@ Request
 - diversity control
 - exploration slot injection
 - freshness fallback / new item boost
-- epsilon-greedy exploration policy
+- reward-aware epsilon-greedy exploration policy
+- Redis 기반 item-level reward update와 UCB exploration score
 
 ### `reason` 필드 분기
 
@@ -126,6 +127,7 @@ Request
 - `ranking_score`
 - `new_item_boost`
 - `mab_exploration`
+- `bandit_reward_exploration`
 
 ### Latency 측정
 
@@ -373,7 +375,7 @@ curl "http://localhost:8003/recommend?user_id=12345&top_n=10&recent_clicks=01087
 
 ### `POST /session/update`
 
-향후 session-event 연동을 위한 placeholder 엔드포인트입니다.
+추천 노출 이후 발생한 클릭/장바구니/구매 이벤트를 reward-aware exploration에 반영합니다. Redis가 사용 가능하면 item-level reward 통계를 갱신하고, Redis가 없으면 추천 API 안정성을 위해 no-op으로 성공 응답을 반환합니다.
 
 예시 요청:
 
@@ -391,7 +393,11 @@ curl -X POST "http://localhost:8003/session/update" \
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "bandit_updated": true,
+  "article_id": "0751471001",
+  "event": "click",
+  "reward": 1.0
 }
 ```
 
@@ -518,8 +524,7 @@ CLI는 다음 결과를 함께 출력합니다.
 - dev 기준 명세 지표는 통과했지만, full production data 기준 재검증은 별도 수행이 필요합니다.
 - cold-start fallback은 구현되어 있으나 dev E2E 샘플에서 cold-start subset이 0명이라 별도 subset metric은 없습니다.
 - 데이터셋 구조와 positive label 추론 방식 때문에 평가 편향이 발생할 수 있습니다.
-- `/session/update`는 아직 placeholder이며 session persistence가 구현되어 있지 않습니다.
-- exploration은 epsilon-greedy slot 기반이며, 온라인 reward update를 갖춘 contextual bandit은 아닙니다.
+- reward-aware exploration은 item-level UCB 기반이며, user-context별 posterior를 학습하는 contextual bandit은 아닙니다.
 - Session은 recent history/session signal 기반이며, GRU/Transformer session encoder는 후속 고도화 항목입니다.
 
 ## 8. TODO
@@ -529,7 +534,7 @@ CLI는 다음 결과를 함께 출력합니다.
 - cold-start 전용 holdout set 구성 및 별도 metric 산출
 - GRU/Transformer 기반 session encoder 고도화
 - popularity fallback을 넘어서는 cold-start 전략 고도화
-- epsilon-greedy exploration을 reward update 기반 bandit 정책으로 업그레이드
+- reward-aware exploration의 offline/online lift 검증
 - user embedding / item embedding 등 feature 추가
 - train/test split 전략 개선으로 offline evaluation 신뢰도 향상
 - volume mount 또는 external storage 기반 대용량 데이터 처리 개선

@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 try:
+    from rec_models.serving.bandit_store import get_bandit_store
     from rec_models.serving.candidate_service import (
         generate_candidates,
         load_candidate_user_profiles,
@@ -27,6 +28,7 @@ try:
     )
     from rec_models.serving.rerank_bridge import rerank_recommendations
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from serving.bandit_store import get_bandit_store  # type: ignore[no-redef]
     from serving.candidate_service import (  # type: ignore[no-redef]
         generate_candidates,
         load_candidate_user_profiles,
@@ -135,6 +137,30 @@ DEFAULT_EXTERNAL_RECOMMENDATION_POOL = 40
 
 def _elapsed_ms(start_time: float) -> int:
     return int(round((time.perf_counter() - start_time) * 1000))
+
+
+def _bandit_scores_for_candidates(scored_candidates: pd.DataFrame) -> dict[str, float]:
+    if scored_candidates.empty or "article_id" not in scored_candidates.columns:
+        return {}
+    article_ids = scored_candidates["article_id"].dropna().astype(str).tolist()
+    if not article_ids:
+        return {}
+    return get_bandit_store().get_ucb_scores(article_ids)
+
+
+def _record_bandit_impressions(
+    user_id: str,
+    recommendations: list[dict[str, Any]],
+    *,
+    surface: str,
+) -> None:
+    recorded = get_bandit_store().record_impressions(
+        user_id=user_id,
+        recommendations=recommendations,
+        surface=surface,
+    )
+    if recorded:
+        LOGGER.debug("Recorded %s bandit impressions for user_id=%s surface=%s", recorded, user_id, surface)
 
 
 def _build_popularity_fallback(scored_candidates: pd.DataFrame) -> pd.DataFrame:
@@ -285,7 +311,7 @@ def rank_candidates_to_recommendations(
 
     session_context = session_context or {"recent_clicks": [], "session_interest": None}
     if "score" in candidate_items.columns:
-        return rerank_recommendations(
+        recommendations = rerank_recommendations(
             scored_candidates=candidate_items,
             top_n=top_n,
             random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
@@ -293,7 +319,10 @@ def rank_candidates_to_recommendations(
             enable_exploration=enable_exploration,
             enable_freshness=enable_freshness,
             rerank_weights=rerank_weights,
+            bandit_scores=_bandit_scores_for_candidates(candidate_items),
         )
+        _record_bandit_impressions(user_id=user_id, recommendations=recommendations, surface="rank_candidates")
+        return recommendations
 
     try:
         scored_candidates = score_candidates(
@@ -305,7 +334,7 @@ def rank_candidates_to_recommendations(
         LOGGER.exception("Ranking stage failed. Falling back to popularity ordering for user_id=%s", user_id)
         scored_candidates = _build_popularity_fallback(candidate_items)
 
-    return rerank_recommendations(
+    recommendations = rerank_recommendations(
         scored_candidates=scored_candidates,
         top_n=top_n,
         random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
@@ -313,7 +342,10 @@ def rank_candidates_to_recommendations(
         enable_exploration=enable_exploration,
         enable_freshness=enable_freshness,
         rerank_weights=rerank_weights,
+        bandit_scores=_bandit_scores_for_candidates(scored_candidates),
     )
+    _record_bandit_impressions(user_id=user_id, recommendations=recommendations, surface="rank_candidates")
+    return recommendations
 
 
 def rerank_external_candidates(
@@ -440,8 +472,10 @@ def rerank_external_candidates(
         top_n=top_n,
         random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
         rerank_weights=effective_rerank_weights,
+        bandit_scores=_bandit_scores_for_candidates(scored_candidates),
     )
     reranking_ms = _elapsed_ms(reranking_start)
+    _record_bandit_impressions(user_id=user_id, recommendations=recommendations, surface="rerank_candidates")
     total_ms = _elapsed_ms(total_start)
 
     LOGGER.info(
@@ -545,8 +579,10 @@ def recommend(
         top_n=top_n,
         random_seed=_random_seed_from_context(user_id=user_id, session_context=session_context),
         rerank_weights=effective_rerank_weights,
+        bandit_scores=_bandit_scores_for_candidates(scored_candidates),
     )
     reranking_ms = _elapsed_ms(reranking_start)
+    _record_bandit_impressions(user_id=user_id, recommendations=recommendations, surface="recommend")
     total_ms = _elapsed_ms(total_start)
 
     LOGGER.info(

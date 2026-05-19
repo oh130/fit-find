@@ -85,6 +85,13 @@ def _safe_category(row: dict[str, Any]) -> str:
     return category or "UNKNOWN"
 
 
+def _normalize_article_id(value: Any) -> str:
+    article_id = str(value or "").strip()
+    if article_id.isdigit():
+        return article_id.zfill(10)
+    return article_id
+
+
 def _sort_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     sortable = candidates.copy()
     sortable["score"] = pd.to_numeric(sortable.get("score"), errors="coerce").fillna(0.0)
@@ -252,7 +259,10 @@ def _compute_exploration_slots(
 def _pick_reason(row: dict[str, Any], exploration_reason: str | None = None) -> str:
     if exploration_reason is not None:
         return exploration_reason
-    return str(row.get("reason", "ranking_score"))
+    reason = row.get("reason", "ranking_score")
+    if pd.isna(reason):
+        return "ranking_score"
+    return str(reason)
 
 
 def _image_url_for_article(article_id: str) -> str:
@@ -276,9 +286,10 @@ def select_exploration_candidates(
     epsilon: float = DEFAULT_EXPLORATION_EPSILON,
     enable_freshness: bool = True,
     rerank_weights: Mapping[str, Any] | RerankWeights | None = None,
+    bandit_scores: Mapping[str, float] | None = None,
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
-    """Select exploration candidates using epsilon-greedy priorities."""
+    """Select exploration candidates using reward-aware epsilon-greedy priorities."""
 
     if remaining_candidates.empty or exploration_slots <= 0:
         return remaining_candidates.head(0).copy()
@@ -304,6 +315,13 @@ def select_exploration_candidates(
     candidates["popularity_norm"] = _normalize_series(candidates.get("popularity", pd.Series(0.0, index=candidates.index)))
     candidates["price_norm"] = _normalized_price(candidates)
     candidates["score_norm"] = _normalize_series(candidates.get("score", pd.Series(0.0, index=candidates.index)))
+    raw_bandit_scores = dict(bandit_scores or {})
+    candidates["bandit_ucb_score"] = (
+        candidates["article_id"]
+        .map(lambda article_id: float(raw_bandit_scores.get(_normalize_article_id(article_id), 0.0)))
+        .fillna(0.0)
+    )
+    candidates["bandit_ucb_norm"] = _normalize_series(candidates["bandit_ucb_score"])
     candidates["coverage_exploration_flag"] = (
         candidates.get("candidate_reason", pd.Series("", index=candidates.index))
         .astype(str)
@@ -329,18 +347,22 @@ def select_exploration_candidates(
             + candidates["popularity_norm"] * (0.20 * weights.popularity)
             - candidates["price_norm"] * price_pressure
             + candidates["coverage_exploration_flag"] * (2.00 * weights.exploration)
+            + candidates["bandit_ucb_norm"] * (0.60 * weights.exploration)
             + freshness_mask.astype(float) * (0.30 * weights.freshness)
             + candidates["random_tiebreaker"] * (0.20 * weights.exploration)
         )
         ordered = candidates.sort_values(["exploration_score", "score", "article_id"], ascending=[False, False, True]).copy()
         ordered.loc[:, "reason"] = "mab_exploration"
+        ordered.loc[ordered["bandit_ucb_score"].gt(0), "reason"] = "bandit_reward_exploration"
         ordered.loc[freshness_mask & ~coverage_mask, "reason"] = "new_item_boost"
     else:
         ordered = candidates.sort_values(["score", "popularity", "article_id"], ascending=[False, False, True]).copy()
         ordered.loc[:, "reason"] = ordered["reason"].fillna("ranking_score")
 
     selected = ordered.head(min(exploration_slots, len(ordered))).copy()
-    selected.loc[:, "is_exploration"] = selected["reason"].isin({"mab_exploration", "new_item_boost"})
+    selected.loc[:, "is_exploration"] = selected["reason"].isin(
+        {"mab_exploration", "bandit_reward_exploration", "new_item_boost"}
+    )
     return selected
 
 
@@ -414,6 +436,7 @@ def rerank_recommendations(
     enable_exploration: bool = True,
     enable_freshness: bool = True,
     rerank_weights: Mapping[str, Any] | RerankWeights | None = None,
+    bandit_scores: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply service-level reranking with diversity, freshness, and exploration."""
 
@@ -468,6 +491,7 @@ def rerank_recommendations(
             epsilon=epsilon,
             enable_freshness=enable_freshness,
             rerank_weights=weights,
+            bandit_scores=bandit_scores,
             rng=rng,
         )
         combined = inject_exploration_slots(primary_ranked=primary_ranked, exploration_candidates=exploration_ranked, top_n=effective_top_n)
