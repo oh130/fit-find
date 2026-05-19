@@ -501,6 +501,35 @@ button {
   flex-wrap: wrap;
 }
 
+.reason-callout {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #faf7f2 0%, #f4eee4 100%);
+  border: 1px solid rgba(120, 88, 48, 0.16);
+}
+
+.reason-label {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(120, 88, 48, 0.12);
+  color: #6c4f2d;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.reason-callout p {
+  margin: 0;
+  color: #3f3425;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
 .persona-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
