@@ -5,13 +5,14 @@ import {
   RecommendationBundle,
   fetchBudgetSets,
   fetchOnboardingPersonaScores,
+  fetchPersonalizedSearchResults,
   fetchRecommendations,
-  fetchSearchResults,
   selectOnboardingPersona,
   sendInteractionEvent,
 } from "./api";
 
 type SearchMode = "text" | "image" | "multimodal";
+type SearchResultView = "similarity" | "personalized";
 
 type SearchResult = {
   id: number;
@@ -39,81 +40,6 @@ type PersonaOption = {
   summary: string;
   traits: string[];
 };
-
-const baseResults: Record<SearchMode, SearchResult[]> = {
-    text: [
-      {
-        id: 1,
-      title: "Urban Edge Rider Jacket",
-      brand: "Mode Atelier",
-      price: "89,000원",
-      similarity: 0.94,
-      searchType: "텍스트 검색",
-      responseTime: "128ms",
-      summary: "질감과 아우터 무드를 반영한 텍스트 기반 탐색 결과입니다.",
-        accent: "linear-gradient(135deg, #35244d 0%, #161822 100%)",
-      },
-      {
-        id: 2,
-      title: "Minimal Zip Blouson",
-      brand: "Noir Form",
-      price: "42,000원",
-      similarity: 0.9,
-      searchType: "텍스트 검색",
-      responseTime: "128ms",
-      summary: "미니멀한 블랙 계열 취향과 잘 맞는 후보입니다.",
-        accent: "linear-gradient(135deg, #84553a 0%, #1a1d26 100%)",
-      },
-    ],
-    image: [
-    {
-      id: 3,
-      title: "Silver Trim Moto Crop",
-      brand: "Avenue N",
-      price: "76,000원",
-      similarity: 0.96,
-      searchType: "이미지 검색",
-      responseTime: "173ms",
-      summary: "업로드 이미지의 실루엣과 광택감을 반영한 결과입니다.",
-        accent: "linear-gradient(135deg, #26314c 0%, #11151d 100%)",
-      },
-      {
-        id: 4,
-      title: "Gloss Rider Short",
-      brand: "Studio Hex",
-      price: "58,000원",
-      similarity: 0.91,
-      searchType: "이미지 검색",
-      responseTime: "173ms",
-      summary: "유사한 재질과 길이감을 우선 반영한 후보입니다.",
-        accent: "linear-gradient(135deg, #5b402f 0%, #181720 100%)",
-      },
-    ],
-    multimodal: [
-    {
-      id: 5,
-      title: "Chrome Detail Urban Rider",
-      brand: "Modu Lab",
-      price: "98,000원",
-      similarity: 0.98,
-      searchType: "텍스트 + 이미지",
-      responseTime: "214ms",
-      summary: "텍스트 설명과 이미지 특징이 함께 반영된 상위 결과입니다.",
-        accent: "linear-gradient(135deg, #42294f 0%, #11131c 100%)",
-      },
-      {
-        id: 6,
-      title: "Blackline Cropped Moto",
-      brand: "Noir Craft",
-      price: "71,000원",
-      similarity: 0.94,
-      searchType: "텍스트 + 이미지",
-      responseTime: "214ms",
-      summary: "질감과 스타일 키워드가 함께 맞아 높은 점수를 받은 결과입니다.",
-        accent: "linear-gradient(135deg, #72412f 0%, #171923 100%)",
-      },
-    ],
-  };
 
 const suggestions = [
   "미니멀한 블랙 아우터",
@@ -226,8 +152,14 @@ function App() {
   const [userId, setUserId] = useState("user_1024");
   const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode>("multimodal");
-  const [results, setResults] = useState<SearchResult[]>(baseResults.multimodal);
-  const [activeLatency, setActiveLatency] = useState("214ms");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [personalizedResults, setPersonalizedResults] = useState<SearchResult[]>([]);
+  const [activeLatency, setActiveLatency] = useState("0ms");
+  const [personalizedLatency, setPersonalizedLatency] = useState("0ms");
+  const [searchResultView, setSearchResultView] = useState<SearchResultView>("similarity");
+  const [searchResultPersona, setSearchResultPersona] = useState("개인화 검색");
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [lastSearchedAt, setLastSearchedAt] = useState("방금 전");
 
@@ -237,6 +169,7 @@ function App() {
   const [activeBundle, setActiveBundle] = useState<RecommendationBundle>(emptyBundle);
   const [recommendationSeed, setRecommendationSeed] = useState(0);
   const [isRefreshingRecommendations, setIsRefreshingRecommendations] = useState(false);
+  const [isGeneratingReasons, setIsGeneratingReasons] = useState(false);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
   const [budgetSets, setBudgetSets] = useState<BudgetSetBundle>(emptyBudgetSetBundle);
   const [isLoadingBudgetSets, setIsLoadingBudgetSets] = useState(false);
@@ -251,7 +184,7 @@ function App() {
   const isManagingHistoryRef = useRef(false);
 
   const popularityWeight = 100 - recommendationWeight;
-  const pricePriorityWeight = recommendationWeight / 50;
+  const personalizationPriorityWeight = recommendationWeight / 50;
   const popularityPriorityWeight = popularityWeight / 50;
   const budgetLabel = `${Number(budget || 0).toLocaleString("ko-KR")}원`;
 
@@ -284,17 +217,19 @@ function App() {
       try {
         const bundle = await fetchRecommendations(userId.trim() || "anonymous", topN, recommendationSeed, {
           personaHint: selectedOnboardingPersona,
-          priceWeight: pricePriorityWeight,
+          personalizationWeight: personalizationPriorityWeight,
           popularityWeight: popularityPriorityWeight,
-          includeReasons: true,
+          includeReasons: false,
         });
 
         if (!cancelled) {
           setActiveBundle(bundle);
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setRecommendationError("추천 결과를 불러오지 못했습니다.");
+          setRecommendationError(
+            error instanceof Error ? error.message : "추천 결과를 불러오지 못했습니다.",
+          );
           setActiveBundle(emptyBundle);
         }
       } finally {
@@ -318,7 +253,7 @@ function App() {
     selectedOnboardingPersona,
     recommendationWeight,
     popularityWeight,
-    pricePriorityWeight,
+    personalizationPriorityWeight,
     popularityPriorityWeight,
   ]);
 
@@ -388,38 +323,43 @@ function App() {
 
     setSearchMode(nextMode);
     setIsSearching(true);
+    setHasSearched(true);
+    setSearchError(null);
+    setSearchResultView("similarity");
 
     try {
-      const response = await fetchSearchResults({
+      const response = await fetchPersonalizedSearchResults({
+        userId: userId.trim() || "anonymous",
         query: trimmedQuery,
         imageBase64: uploadedImage?.base64 ?? null,
-        topK: 10,
+        topK: 80,
+        topN: 10,
         mode: nextMode,
+        personaHint: selectedOnboardingPersona,
       });
 
-      if (response.items.length > 0) {
-        setResults(response.items);
-        setActiveLatency(response.responseTime);
+      if (response.similarity.items.length > 0) {
+        setResults(response.similarity.items);
       } else {
-        setResults(baseResults[nextMode]);
-        setActiveLatency(baseResults[nextMode][0]?.responseTime ?? "128ms");
+        setResults([]);
       }
+      setActiveLatency(response.similarity.responseTime);
+
+      setPersonalizedResults(response.personalized.items);
+      setPersonalizedLatency(response.personalized.responseTime);
+      setSearchResultPersona(response.personalized.persona);
 
       if (isRegistered && trimmedQuery) {
-        try {
-          await sendInteractionEvent({
-            userId: userId.trim() || "anonymous",
-            eventType: "search",
-            queryText: trimmedQuery,
-          });
-          setRecommendationSeed((current) => current + 1);
-        } catch {
-          // Search results should remain visible even if personalization logging fails.
-        }
+        setRecommendationSeed((current) => current + 1);
       }
-    } catch {
-      setResults(baseResults[nextMode]);
-      setActiveLatency(baseResults[nextMode][0]?.responseTime ?? "128ms");
+    } catch (error) {
+      setResults([]);
+      setActiveLatency("0ms");
+      setPersonalizedResults([]);
+      setPersonalizedLatency("0ms");
+      setSearchResultPersona("개인화 검색");
+      setSearchResultView("similarity");
+      setSearchError(error instanceof Error ? error.message : "검색 결과를 불러오지 못했습니다.");
     } finally {
       setLastSearchedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
       setIsSearching(false);
@@ -486,6 +426,31 @@ function App() {
     setRecommendationSeed((current) => current + 1);
   };
 
+  const generateRecommendationReasons = async () => {
+    if (!isRegistered) {
+      return;
+    }
+
+    setIsGeneratingReasons(true);
+    setRecommendationError(null);
+
+    try {
+      const bundle = await fetchRecommendations(userId.trim() || "anonymous", topN, recommendationSeed, {
+        personaHint: selectedOnboardingPersona,
+        personalizationWeight: personalizationPriorityWeight,
+        popularityWeight: popularityPriorityWeight,
+        includeReasons: true,
+      });
+      setActiveBundle(bundle);
+    } catch (error) {
+      setRecommendationError(
+        error instanceof Error ? error.message : "AI 추천 이유를 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+      );
+    } finally {
+      setIsGeneratingReasons(false);
+    }
+  };
+
   const loadBudgetSets = async () => {
     const parsedBudget = Number(budget);
     if (!userId.trim() || !Number.isFinite(parsedBudget) || parsedBudget <= 0) {
@@ -519,6 +484,7 @@ function App() {
       await selectOnboardingPersona({
         userId: userId.trim() || "anonymous",
         persona: selectedOnboardingPersona,
+        personaScores,
       });
       setShowOnboarding(false);
       setBudgetSets(emptyBudgetSetBundle);
@@ -535,6 +501,16 @@ function App() {
   const selectedPersona =
     personaOptions.find((persona) => persona.key === selectedOnboardingPersona) ?? null;
   const selectedPersonaLabel = selectedPersona?.name ?? selectedOnboardingPersona;
+  const activeSearchResults = searchResultView === "personalized" ? personalizedResults : results;
+  const activeSearchLatency = searchResultView === "personalized" ? personalizedLatency : activeLatency;
+  const activeSearchScoreLabel = searchResultView === "personalized" ? "추천 점수" : "유사도";
+  const searchEmptyMessage = !hasSearched
+    ? "검색을 실행하면 유사도순 결과와 내 취향순 결과가 여기에 표시됩니다."
+    : searchError
+      ? searchError
+      : searchResultView === "personalized"
+        ? "검색 후보 안에서 개인화된 결과가 아직 없습니다. 검색을 다시 시도해 주세요."
+        : "검색 결과가 없습니다. 검색어를 조금 더 구체적으로 바꿔 보세요.";
 
   if (showOnboarding) {
     return (
@@ -783,31 +759,59 @@ function App() {
               <h3>검색 결과</h3>
             </div>
             <div className="heading-metrics">
-              <span className="metric">응답 시간 {activeLatency}</span>
-              <span className="metric">결과 수 {results.length}</span>
+              <span className="metric">응답 시간 {activeSearchLatency}</span>
+              <span className="metric">결과 수 {activeSearchResults.length}</span>
             </div>
           </div>
 
-          <div className="result-list">
-            {results.map((item) => (
-              <article key={item.id} className="result-card">
-                <ResultVisual imageUrl={item.imageUrl} title={item.title} accent={item.accent} />
-                <div className="result-meta">
-                  <div className="result-topline">
-                    <p>{item.brand}</p>
-                    <strong>{item.price}</strong>
-                  </div>
-                  <h4>{item.title}</h4>
-                  <p>{item.summary}</p>
-                  <div className="result-stats">
-                    <span className="badge">유사도 {(item.similarity * 100).toFixed(1)}%</span>
-                    <span className="badge">{item.searchType}</span>
-                    <span className="badge">응답 {item.responseTime}</span>
-                  </div>
-                </div>
-              </article>
-            ))}
+          <div className="search-tabs result-tabs" aria-label="검색 결과 정렬 방식">
+            <button
+              type="button"
+              className={searchResultView === "similarity" ? "active" : ""}
+              onClick={() => setSearchResultView("similarity")}
+            >
+              유사도순
+            </button>
+            <button
+              type="button"
+              className={searchResultView === "personalized" ? "active" : ""}
+              onClick={() => setSearchResultView("personalized")}
+            >
+              내 취향순
+            </button>
           </div>
+
+          {activeSearchResults.length === 0 ? (
+            <div className="empty-state">
+              <p>{searchEmptyMessage}</p>
+            </div>
+          ) : (
+            <div className="result-list">
+              {activeSearchResults.map((item) => (
+                <article key={item.id} className="result-card">
+                  <ResultVisual imageUrl={item.imageUrl} title={item.title} accent={item.accent} />
+                  <div className="result-meta">
+                    <div className="result-topline">
+                      <p>{item.brand}</p>
+                      <strong>{item.price}</strong>
+                    </div>
+                    <h4>{item.title}</h4>
+                    <p>{item.summary}</p>
+                    <div className="result-stats">
+                      <span className="badge">
+                        {activeSearchScoreLabel} {(item.similarity * 100).toFixed(1)}%
+                      </span>
+                      <span className="badge">{item.searchType}</span>
+                      <span className="badge">응답 {item.responseTime}</span>
+                      {searchResultView === "personalized" ? (
+                        <span className="badge">{searchResultPersona}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="panel">
@@ -881,6 +885,14 @@ function App() {
               <button
                 type="button"
                 className="primary-button"
+                onClick={generateRecommendationReasons}
+                disabled={isGeneratingReasons || isRefreshingRecommendations || !isRegistered}
+              >
+                {isGeneratingReasons ? "이유 생성 중..." : "AI 추천 이유"}
+              </button>
+              <button
+                type="button"
+                className="primary-button"
                 onClick={loadBudgetSets}
                 disabled={isLoadingBudgetSets || !isRegistered}
               >
@@ -893,7 +905,9 @@ function App() {
             <div className="weight-copy">
               <p className="eyebrow">Recommendation Control</p>
               <h4>개인화와 대중성의 비중을 조절합니다</h4>
-              <p>슬라이더를 움직이면 추천 결과에서 취향 반영 강도와 대중성을 함께 조절할 수 있습니다.</p>
+              <p>
+                슬라이더를 움직이면 추천 결과에서 취향 반영 강도와 대중성을 함께 조절할 수 있습니다.
+              </p>
             </div>
             <div className="weight-control">
               <div className="weight-labels">
@@ -917,6 +931,9 @@ function App() {
           {recommendationError ? <p className="status-text">{recommendationError}</p> : null}
           {isRefreshingRecommendations ? (
             <p className="status-text">최신 추천 결과를 불러오는 중입니다.</p>
+          ) : null}
+          {isGeneratingReasons ? (
+            <p className="status-text">AI가 현재 추천 리스트의 이유를 생성하는 중입니다.</p>
           ) : null}
           {budgetSetError ? <p className="status-text">{budgetSetError}</p> : null}
 

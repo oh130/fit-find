@@ -31,6 +31,13 @@ services:
     build: ./rec_models
     ports:
       - "8003:8003"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RANKING_CHECKPOINT_DIR=/app/rec_models/checkpoints/logreg_dev
+      - TWO_TOWER_CHECKPOINT_DIR=/app/data/checkpoints/candidate_dev_history_itemid_fast
+    depends_on:
+      - redis
     volumes:
       - ./data:/app/data
       - huggingface_cache:/root/.cache/huggingface

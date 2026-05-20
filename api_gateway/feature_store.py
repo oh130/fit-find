@@ -4,6 +4,7 @@ Redis 기반 Feature Store.
 저장 구조:
   user:{user_id}:recent_clicks   — List<item_id>, 최근 20개
   user:{user_id}:session_interest — Hash<category, score>
+  user:{user_id}:persona_scores   — JSON<persona, score>, 온보딩 페르소나 비율
   user:{user_id}:click_count     — 총 클릭 수 (int)
 """
 
@@ -14,6 +15,7 @@ import redis
 RECENT_CLICKS_MAX = 20
 CLICK_TTL = 60 * 60 * 24 * 7  # 7일
 QUERY_INTEREST_CACHE_TTL = 60 * 60 * 24 * 7  # 7일
+PERSONA_SCORE_TTL = 60 * 60 * 24 * 30  # 30일
 
 
 class RedisFeatureStore:
@@ -43,6 +45,20 @@ class RedisFeatureStore:
     def get_session_interest(self, user_id: str) -> dict:
         val = self.r.get(f"user:{user_id}:session_interest")
         return json.loads(val) if val else {}
+
+    # ── 온보딩 페르소나 비율 ────────────────────────────────
+    def set_persona_scores(self, user_id: str, persona_scores: dict) -> None:
+        self.r.set(f"user:{user_id}:persona_scores", json.dumps(persona_scores), ex=PERSONA_SCORE_TTL)
+
+    def get_persona_scores(self, user_id: str) -> dict:
+        val = self.r.get(f"user:{user_id}:persona_scores")
+        if not val:
+            return {}
+        try:
+            parsed = json.loads(val)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def invalidate_recommendation_cache(self, user_id: str) -> int:
         """Delete cached recommendation responses for one user.
@@ -86,5 +102,6 @@ class RedisFeatureStore:
             "user_id": user_id,
             "recent_clicks": self.get_recent_clicks(user_id),
             "session_interest": self.get_session_interest(user_id),
+            "persona_scores": self.get_persona_scores(user_id),
             "click_count": self.get_click_count(user_id),
         }

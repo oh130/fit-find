@@ -1,0 +1,6 @@
+﻿query_id,query,relevant_items,relevant_count,query_image_path,query_product_id,source_split
+search_q_0001,dark blue jacket,0647490002|0649227001|0658358003|0805505001,4,D:\imagedata\064\0647490002.jpg,0647490002,catalog_grouped
+search_q_0002,black socks,0181448105|0623653001|0783707046,3,D:\imagedata\018\0181448105.jpg,0181448105,catalog_grouped
+search_q_0003,dark blue t-shirt,0386859053|0617534016,2,D:\imagedata\038\0386859053.jpg,0386859053,catalog_grouped
+search_q_0004,white vest top,0572799002|0653941006,2,D:\imagedata\057\0572799002.jpg,0572799002,catalog_grouped
+search_q_0005,yellowish brown jacket,0816363001|0846604001,2,D:\imagedata\081\0816363001.jpg,0816363001,catalog_grouped

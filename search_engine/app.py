@@ -1,15 +1,19 @@
 """
-Search Engine API — port 8002
+Search Engine API on port 8002.
 
-엔드포인트:
-  POST /search   텍스트/이미지/hybrid 검색
-  GET  /health
+This FastAPI layer intentionally stays thin:
+- build/load a reusable MultimodalSearchEngine
+- decode request payloads
+- delegate text/image/hybrid retrieval to search_engine.py
+- expose health and optional item image endpoints
 """
 
 from __future__ import annotations
 
 import base64
+import csv
 import io
+import json
 import logging
 import os
 import time
@@ -17,218 +21,336 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pandas as pd
-from fastapi import FastAPI, HTTPException
-from PIL import Image
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from transformers import CLIPModel, CLIPProcessor
 
 from search_engine import MultimodalSearchEngine
 
 LOGGER = logging.getLogger(__name__)
 
-EMBEDDING_DIM = 512
-TEST_SAMPLE_SIZE = 500
-DATA_PATH = Path("/app/data/processed/articles_feature.csv")
+FILE_DIR = Path(__file__).resolve().parent
+if (FILE_DIR / "data").exists():
+    DEFAULT_PROJECT_DATA_DIR = FILE_DIR / "data"
+else:
+    DEFAULT_PROJECT_DATA_DIR = FILE_DIR.parent / "data"
+DEFAULT_CACHE_DIR = DEFAULT_PROJECT_DATA_DIR / "faiss_index"
+INDEX_CACHE_VERSIONS = {"clip_multimodal_v2", "clip_multimodal_v3"}
+TEST_INDEX_PATH = DEFAULT_CACHE_DIR / "search_test_v2.index"
+TEST_META_PATH = DEFAULT_CACHE_DIR / "search_test_v2_metadata.json"
+DEV_INDEX_PATH = DEFAULT_CACHE_DIR / "search_dev_v2.index"
+DEV_META_PATH = DEFAULT_CACHE_DIR / "search_dev_v2_metadata.json"
+PROD_INDEX_PATH = DEFAULT_CACHE_DIR / "search_v2.index"
+PROD_META_PATH = DEFAULT_CACHE_DIR / "search_v2_metadata.json"
+PRICE_KRW_FACTOR = 1_000_000
 
-# test/production 인덱스 캐시 경로 분리
-TEST_INDEX_PATH = Path("/app/data/faiss_index/search_test.index")
-TEST_META_PATH  = Path("/app/data/faiss_index/search_test_metadata.json")
-PROD_INDEX_PATH = Path("/app/data/faiss_index/search.index")
-PROD_META_PATH  = Path("/app/data/faiss_index/search_metadata.json")
-
-# 전역 객체 (search_engine.embedder에서 노출 — 별도 로딩 없음)
-clip_model: CLIPModel
-clip_processor: CLIPProcessor
 search_engine: MultimodalSearchEngine
-product_metadata: dict[str, dict[str, Any]] = {}
+article_meta: dict[str, dict[str, Any]] = {}
+
+
+def _configured_data_root() -> str | None:
+    return os.getenv("SEARCH_ENGINE_DATA_ROOT") or os.getenv("DATA_ROOT") or str(DEFAULT_PROJECT_DATA_DIR)
+
+
+PROCESSED_DATA_DIR = Path(_configured_data_root() or DEFAULT_PROJECT_DATA_DIR)
+if PROCESSED_DATA_DIR.name != "processed":
+    PROCESSED_DATA_DIR = PROCESSED_DATA_DIR / "processed"
+ARTICLES_PATH = PROCESSED_DATA_DIR / "articles_feature.csv"
+ITEM_FEATURES_CANDIDATES = [
+    PROCESSED_DATA_DIR / "item_features_test.csv",
+    PROCESSED_DATA_DIR / "item_features_dev.csv",
+    PROCESSED_DATA_DIR / "item_features.csv",
+]
+
+
+def _artifact_paths(mode: str) -> tuple[Path, Path]:
+    if mode == "test":
+        return TEST_INDEX_PATH, TEST_META_PATH
+    if mode == "dev":
+        return DEV_INDEX_PATH, DEV_META_PATH
+    return PROD_INDEX_PATH, PROD_META_PATH
+
+
+def _normalize_article_id(value: object) -> str:
+    raw = str(value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return raw
+    return digits[-10:].zfill(10)
+
+
+def _load_article_meta() -> dict[str, dict[str, Any]]:
+    meta: dict[str, dict[str, Any]] = {}
+    if not ARTICLES_PATH.exists():
+        return meta
+
+    with ARTICLES_PATH.open(encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            article_id = str(row.get("article_id", "")).strip()
+            if not article_id:
+                continue
+            meta[article_id] = {
+                "name": row.get("prod_name", "") or row.get("name", ""),
+                "category": row.get("category", ""),
+                "color": row.get("color", ""),
+                "product_type": row.get("product_type", ""),
+                "price": 0,
+            }
+
+    for path in ITEM_FEATURES_CANDIDATES:
+        if not path.exists():
+            continue
+        with path.open(encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                article_id = str(row.get("article_id", "")).strip()
+                if article_id not in meta:
+                    continue
+                try:
+                    raw_price = float(row.get("avg_price", 0) or 0)
+                    meta[article_id]["price"] = int(raw_price * PRICE_KRW_FACTOR)
+                except (TypeError, ValueError):
+                    continue
+        break
+    return meta
+
+
+def _item_image_bytes(item: Any) -> bytes | None:
+    image_base64 = str(getattr(item, "metadata", {}).get("_image_base64", "")).strip()
+    if image_base64:
+        try:
+            return base64.b64decode(image_base64)
+        except Exception:
+            pass
+
+    image_path = _resolve_item_image_path(item)
+    if image_path is not None:
+        try:
+            return image_path.read_bytes()
+        except OSError:
+            return None
+
+    if item.image is not None:
+        buffer = io.BytesIO()
+        item.image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    return None
+
+
+def _artifacts_match(meta_path: Path, mode: str) -> bool:
+    if not meta_path.exists():
+        return False
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("Failed to read search metadata %s: %s", meta_path, exc)
+        return False
+    return (
+        payload.get("index_format") in INDEX_CACHE_VERSIONS
+        and str(payload.get("mode", "")).lower() == mode
+    )
+
+
+def _build_or_load_engine(mode: str) -> MultimodalSearchEngine:
+    data_root = _configured_data_root()
+    index_path, meta_path = _artifact_paths(mode)
+
+    if index_path.exists() and meta_path.exists() and _artifacts_match(meta_path, mode):
+        LOGGER.info("Loading cached %s search index from %s", mode, index_path)
+        return MultimodalSearchEngine.load_from_artifacts(
+            str(index_path),
+            str(meta_path),
+            mode=mode,
+            data_root=data_root,
+        )
+
+    LOGGER.info("Building fresh %s multimodal search index", mode)
+    engine = MultimodalSearchEngine(mode=mode, data_root=data_root)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    engine.save_index(str(index_path), str(meta_path))
+    LOGGER.info("Saved %s multimodal search index to %s", mode, index_path)
+    return engine
 
 
 def image_url_for_article(article_id: str) -> str:
     return f"/api/images/{article_id}"
 
 
-def _embed_df(engine: MultimodalSearchEngine, df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """engine.embedder로 DataFrame을 임베딩하고 FAISS 인덱스를 빌드한다."""
-    embeddings: list[np.ndarray] = []
-    metadatas: list[dict[str, Any]] = []
-
-    for _, row in df.iterrows():
-        article_id = str(row.get("article_id", "")).strip()
-        if not article_id:
-            continue
-
-        text = " ".join(filter(None, [
-            row.get("prod_name", ""),
-            row.get("product_type_name", ""),
-            row.get("colour_group_name", ""),
-            row.get("department_name", ""),
-        ])) or article_id
-
-        vec = engine.embedder.embed_text(text)  # CLIP 추론 (전역 모델 재사용)
-        if vec.shape[0] != engine.dimension:
-            LOGGER.warning("임베딩 shape 불일치 (article_id=%s) — 건너뜀", article_id)
-            continue
-
-        embeddings.append(vec)
-        metadatas.append({
-            "article_id": article_id,
-            "product_id": article_id,
-            "name": row.get("prod_name", ""),
-            "price": 0.0,
-            "category": row.get("category", ""),
-            "main_category": row.get("main_category", ""),
-            "color": row.get("colour_group_name", ""),
-        })
-
-    if not embeddings:
-        return {}
-
-    engine.build_index(
-        embeddings=np.stack(embeddings).astype(np.float32),
-        item_ids=list(range(len(embeddings))),
-        metadatas=metadatas,
-    )
-    LOGGER.info("FAISS 인덱스 빌드 완료: %d건", len(embeddings))
-    return {str(m["product_id"]): m for m in metadatas}
+def _decode_request_image_bytes(image_base64: str | None) -> bytes | None:
+    if not image_base64:
+        return None
+    try:
+        return base64.b64decode(image_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to decode image_base64: {exc}") from exc
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global clip_model, clip_processor, search_engine, product_metadata
+    global search_engine, article_meta
 
-    mode = os.getenv("SEARCH_ENGINE_MODE", "test")
-    index_path = TEST_INDEX_PATH if mode == "test" else PROD_INDEX_PATH
-    meta_path  = TEST_META_PATH  if mode == "test" else PROD_META_PATH
-    sample_size = TEST_SAMPLE_SIZE if mode == "test" else None
-
-    if index_path.exists() and meta_path.exists():
-        # 캐시 히트: 저장된 인덱스 로드 (수초, CLIP 1회 로딩)
-        LOGGER.info("%s 모드 — 저장된 FAISS 인덱스 로드: %s", mode, index_path)
-        search_engine = MultimodalSearchEngine.load_from_artifacts(str(index_path), str(meta_path))
-        product_metadata = {
-            item.product_id: {"product_id": item.product_id, "name": item.name, "price": item.price}
-            for item in search_engine.items
-        }
-        LOGGER.info("FAISS 인덱스 로드 완료: %d건", len(search_engine.items))
-
-    else:
-        # 캐시 미스: 임베딩 후 저장 (CLIP 1회 로딩)
-        search_engine = MultimodalSearchEngine("test")  # CLIP 로드 (더미 인덱스로 초기화)
-
-        if DATA_PATH.exists():
-            df = pd.read_csv(DATA_PATH, dtype=str).fillna("")
-            if sample_size:
-                df = df.sample(n=min(sample_size, len(df)), random_state=42)
-            LOGGER.info("%s 모드 — %d건 임베딩 시작 (최초 1회, 이후 캐시 사용)", mode, len(df))
-            product_metadata = _embed_df(search_engine, df)
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            search_engine.save_index(str(index_path), str(meta_path))
-            LOGGER.info("FAISS 인덱스 저장 완료: %s", index_path)
-        else:
-            LOGGER.warning("articles_feature.csv 없음 — 더미 12개로 실행")
-            product_metadata = {}
-
-    # CLIP을 별도로 로딩하지 않고 search_engine.embedder에서 노출 (중복 로딩 제거)
-    clip_model = search_engine.embedder.model
-    clip_processor = search_engine.embedder.processor
-
+    mode = os.getenv("SEARCH_ENGINE_MODE", "test").strip().lower() or "test"
+    search_engine = _build_or_load_engine(mode)
+    article_meta = _load_article_meta()
+    _warm_up_search_engine()
     yield
 
 
 app = FastAPI(title="Search Engine", lifespan=lifespan)
 
 
-# ── 요청/응답 스키마 ──────────────────────────────────────────
-
 class SearchRequest(BaseModel):
     query: str = ""
     image_base64: str | None = None
     top_k: int = 10
+    use_cache: bool = True
 
 
-# ── 엔드포인트 ────────────────────────────────────────────────
+def _base64_payload_from_item(item: Any) -> tuple[str, str]:
+    image_base64 = str(getattr(item, "metadata", {}).get("_image_base64", "")).strip()
+    if image_base64:
+        return image_base64, "image/jpeg"
+
+    image_path = _resolve_item_image_path(item)
+    if image_path is not None:
+        mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+        return base64.b64encode(image_path.read_bytes()).decode("utf-8"), mime_type
+
+    if item.image is not None:
+        buffer = io.BytesIO()
+        item.image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8"), "image/png"
+
+    raise HTTPException(status_code=404, detail="Image not available for this item")
+
+
+def _resolve_item_image_path(item: Any) -> Path | None:
+    if item.image_path:
+        candidate = Path(item.image_path)
+        if candidate.exists():
+            return candidate
+
+    normalized_id = _normalize_article_id(getattr(item, "product_id", ""))
+    if not normalized_id:
+        return None
+
+    candidate_roots = []
+    try:
+        candidate_roots.extend(search_engine._candidate_image_roots())  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    for root in candidate_roots:
+        for suffix in (".jpg", ".jpeg", ".png"):
+            candidate = Path(root) / normalized_id[:3] / f"{normalized_id}{suffix}"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _warm_up_search_engine() -> None:
+    try:
+        search_engine.search(query="black dress", top_k=1)
+        sample_item = next((item for item in search_engine.items if item.image is not None or item.image_path), None)
+        if sample_item is None:
+            return
+        image_bytes = _item_image_bytes(sample_item)
+        if not image_bytes:
+            return
+        # Prime image-only and hybrid paths so first uncached user queries do not pay
+        # the one-time model/kernel warm-up cost.
+        search_engine.search(image_bytes=image_bytes, top_k=1)
+        warm_query = sample_item.name or sample_item.description or "fashion item"
+        search_engine.search(query=warm_query, image_bytes=image_bytes, top_k=1)
+    except Exception as exc:
+        LOGGER.warning("Search engine warm-up skipped due to error: %s", exc)
+
 
 @app.post("/search")
+@app.post("/api/search")
 async def search(req: SearchRequest) -> dict[str, Any]:
-    start = time.perf_counter()
-    has_text = bool(req.query.strip())
-    has_image = bool(req.image_base64)
+    if not req.query.strip() and not req.image_base64:
+        raise HTTPException(status_code=400, detail="query or image_base64 is required")
 
-    if not has_text and not has_image:
-        raise HTTPException(status_code=400, detail="query 또는 image_base64 중 하나는 필요합니다.")
-
-    text_emb = None
-    image_emb = None
-
-    if has_text:
-        text_emb = search_engine.embedder.embed_text(req.query)
-
-    if has_image:
-        try:
-            image_bytes = base64.b64decode(req.image_base64)
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            image_emb = search_engine.embedder.embed_image(image)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"이미지 디코딩 실패: {e}")
-
-    if has_text and has_image:
-        search_type = "hybrid"
-    elif has_image:
-        search_type = "image"
-    else:
-        search_type = "text"
-
-    #if search_engine is None:
-    #raise HTTPException(status_code=503, detail="Search engine not initialized")
-
-    '''if not search_engine._is_built:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return {
-            "search_type": search_type,
-            "results": [],
-            "latency_ms": round(latency_ms, 2),
-            "total_count": 0,
-        }'''
-
-    raw_results = search_engine.search(
-        query_type=search_type,
-        embedding=text_emb if search_type == "text" else (image_emb if search_type == "image" else None),
-        text_embedding=text_emb if search_type == "hybrid" else None,
-        image_embedding=image_emb if search_type == "hybrid" else None,
-        top_k=req.top_k,
+    started = time.perf_counter()
+    image_bytes = _decode_request_image_bytes(req.image_base64)
+    response = search_engine.search(
+        query=req.query,
+        image_bytes=image_bytes,
+        top_k=max(1, int(req.top_k)),
+        use_cache=bool(req.use_cache),
     )
+    response["latency_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
 
-    results = []
-    for r in raw_results:
-        meta = r.metadata or {}
-        product_id = str(meta.get("product_id", r.item_id))
-        results.append({
-            "product_id": product_id,
-            "name": meta.get("name", ""),
-            "score": round(r.score, 4),
-            "price": float(meta.get("price", 0.0)),
-            "image_url": image_url_for_article(product_id),
-        })
+    for result in response.get("results", []):
+        product_id = str(result.get("product_id", "")).strip()
+        if product_id:
+            meta = article_meta.get(product_id, {})
+            result["image_url"] = image_url_for_article(product_id)
+            result["name"] = meta.get("name") or result.get("name") or product_id
+            result["category"] = meta.get("category", "")
+            result["color"] = meta.get("color", "")
+            result["product_type"] = meta.get("product_type", "")
+            result["price"] = meta.get("price", 0)
+        else:
+            result.setdefault("category", "")
+            result.setdefault("color", "")
+            result.setdefault("product_type", "")
+    return response
 
-    latency_ms = (time.perf_counter() - start) * 1000
-    return {
-        "search_type": search_type,
-        "results": results,
-        "latency_ms": round(latency_ms, 2),
-        "total_count": len(results),
-    }
+
+@app.get("/api/images/{article_id}")
+async def get_item_image(
+    article_id: str,
+    request: Request,
+    format: str = Query("binary", pattern="^(binary|base64)$"),
+):
+    item = search_engine.find_item(article_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    wants_base64 = format == "base64" or "application/json" in request.headers.get("accept", "").lower()
+    if wants_base64:
+        image_base64, mime_type = _base64_payload_from_item(item)
+        normalized_id = _normalize_article_id(article_id)
+        return JSONResponse(
+            {
+                "article_id": str(article_id),
+                "normalized_article_id": normalized_id or str(article_id),
+                "image_base64": image_base64,
+                "content_type": mime_type,
+            }
+        )
+
+    resolved_path = _resolve_item_image_path(item)
+    if resolved_path is not None:
+        return FileResponse(resolved_path)
+
+    if item.image is not None:
+        buffer = io.BytesIO()
+        item.image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return StreamingResponse(buffer, media_type="image/png")
+
+    raise HTTPException(status_code=404, detail="Image not available for this item")
 
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    image_backed_items = 0
+    for item in search_engine.items:
+        if item.image is not None or item.image_path:
+            image_backed_items += 1
+
     return {
         "status": "ok",
+        "mode": search_engine.mode,
         "index_size": len(search_engine) if search_engine._is_built else 0,
+        "image_backed_items": image_backed_items,
+        "data_root": str(search_engine.data_root),
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("app:app", host="0.0.0.0", port=8002, reload=False)

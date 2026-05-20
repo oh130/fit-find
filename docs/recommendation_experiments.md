@@ -13,16 +13,35 @@
 
 ## 2. 최종 결론
 
-추천 모델 파이프라인은 dev 기준으로 명세 지표를 통과했다.
+추천 모델 파이프라인은 최신 dev 기준으로 명세 지표를 통과했다. 2026-05-14에는 2026-05-13 생성 dev 데이터와 9개 페르소나 score를 기준으로 candidate/ranking 모델을 재학습하고 최종 serving 평가를 다시 수행했다.
 
 | 단계 | 명세 기준 | 최종 결과 | 판정 | 원본 결과 |
 |---|---:|---:|---|---|
-| Candidate Generation | Recall@300 >= 0.30 | 0.614632 | 통과 | `rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json` |
-| Ranking | AUC >= 0.70 | 0.956739 | 통과 | `rec_models/reports/ranking_experiments/dev_ranking_logreg.json` |
-| Final Recommendation | HitRate@50 >= 0.20 | 0.497000 | 통과 | `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json` |
-| Final Recommendation | NDCG@50 >= 0.08 | 0.178138 | 통과 | `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json` |
-| Final Recommendation | Coverage@50 >= 0.20 | 0.215203 | 통과 | `rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json` |
-| Serving Latency | <= 200ms | p95 187.61ms | 통과 | `rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json` |
+| Candidate Generation | Recall@300 >= 0.30 | 0.602922 | 통과 | `rec_models/reports/candidate_experiments/dev_two_tower_persona_latest_1000.json` |
+| Ranking | AUC >= 0.70 | 0.960505 | 통과 | `rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_1000.json` |
+| Final Recommendation | HitRate@50 >= 0.20 | 0.491000 | 통과 | `rec_models/reports/baseline/dev_e2e_persona_latest_1000.json` |
+| Final Recommendation | NDCG@50 >= 0.08 | 0.177184 | 통과 | `rec_models/reports/baseline/dev_e2e_persona_latest_1000.json` |
+| Final Recommendation | Coverage@50 >= 0.20 | 0.214607 | 통과 | `rec_models/reports/baseline/dev_e2e_persona_latest_1000.json` |
+| Serving Latency | <= 200ms | p95 162.23ms | 통과 | `rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json` |
+
+페르소나 적용 전 최종 채택 결과와 적용 후 최신 재검증 결과의 비교는 다음과 같다.
+
+| 지표 | 적용 전 | 적용 후 | 변화 |
+|---|---:|---:|---:|
+| Candidate Recall@300 | 0.614632 | 0.602922 | -0.011710 |
+| Ranking AUC | 0.956739 | 0.960505 | +0.003766 |
+| Ranking NDCG@50 | 0.981341 | 0.983664 | +0.002323 |
+| E2E HitRate@50 | 0.497000 | 0.491000 | -0.006000 |
+| E2E NDCG@50 | 0.178138 | 0.177184 | -0.000954 |
+| E2E Coverage@50 | 0.215203 | 0.214607 | -0.000597 |
+| Serving latency p95 | 187.61ms | 162.23ms | -25.38ms |
+
+해석:
+
+- 페르소나 적용 후에도 모든 명세 지표를 통과했다.
+- Ranking AUC와 Ranking NDCG는 소폭 개선되었다.
+- Candidate와 최종 E2E 지표는 소폭 하락했지만, 절대값 기준으로는 명세 하한을 충분히 넘는다.
+- 페르소나는 추천 성능을 크게 올리는 목적보다 사용자 의도 반영, 추천 제어, 설명 가능성 강화를 위한 기능으로 해석한다.
 
 최종 serving 흐름:
 
@@ -50,6 +69,12 @@ dev processed data
 | 2026-05-06 | `dev_serving_latency_top50_50users_pool75` | Serving | top-50 API path latency 측정 | avg 127.47ms, p95 187.61ms | 채택 |
 | 2026-05-06 | `dev_e2e_twotower_serving_latency_pool75_1000` | Final Pipeline | latency 튜닝 코드 기준 E2E 재검증 | HitRate@50 0.497000, NDCG@50 0.178138, Coverage@50 0.215203 | 최종 채택 |
 | 2026-05-06 | `dev_candidate_hybrid_combo` | Candidate | heuristic candidate 조합 비교 | profile + copurchase + sequential Recall@300 0.301 | 보조 baseline |
+| 2026-05-14 | `dev_two_tower_persona_latest_1000` | Candidate | 9개 페르소나 최신 dev 데이터 기준 candidate 재평가 | Recall@300 0.602922 | 최신 재검증 |
+| 2026-05-14 | `dev_ranking_logreg_persona_latest_1000` | Ranking | 9개 페르소나 feature 포함 LogReg 재학습/평가 | AUC 0.960505, NDCG@50 0.983664 | 최신 재검증 |
+| 2026-05-14 | `dev_e2e_persona_latest_1000` | Final Pipeline | 페르소나 적용 후 serving E2E 1000명 평가 | HitRate@50 0.491000, NDCG@50 0.177184, Coverage@50 0.214607 | 최신 재검증 |
+| 2026-05-14 | `dev_e2e_persona_latest_baseline_compare_1000` | Final Pipeline | 페르소나 적용 모델과 popularity baseline 비교 | HitRate +0.086, NDCG +0.108, Coverage +0.199 | 최신 재검증 |
+| 2026-05-14 | `dev_e2e_persona_latest_5000` | Final Pipeline | 페르소나 적용 후 serving E2E 5000명 확대 평가 | HitRate@50 0.480800, NDCG@50 0.173457, Coverage@50 0.536535 | 최신 재검증 |
+| 2026-05-14 | `dev_serving_latency_persona_latest_top50_50users` | Serving | 페르소나 적용 후 top-50 API path latency 재측정 | avg 125.43ms, p95 162.23ms | 최신 재검증 |
 
 ## 4. 데이터와 재현 조건
 
@@ -197,6 +222,12 @@ rec_models/checkpoints/logreg_dev/ranking_baseline.joblib
 rec_models/checkpoints/logreg_dev/ranking_baseline_metadata.json
 ```
 
+Serving checkpoint resolution:
+
+- `RANKING_CHECKPOINT_DIR` 환경변수가 있으면 해당 경로 사용
+- 없으면 `rec_models/checkpoints/logreg_dev` 우선 사용
+- fallback: 기존 `rec_models/checkpoints` 루트 artifact
+
 명세가 요구하는 ranking 항목은 `DeepFM/Wide&Deep 또는 CTR/CVR ranking`이므로, CTR ranking pipeline으로 충족한다. DeepFM은 구현 및 비교 실험이 있으나 최종 dev 기준에서는 LogReg가 더 안정적이므로 serving 채택안에서 제외했다.
 
 ### 6.2 학습 명령
@@ -213,15 +244,15 @@ rec_models/checkpoints/logreg_dev/ranking_baseline_metadata.json
 원본 결과:
 
 ```text
-rec_models/reports/ranking_experiments/dev_ranking_logreg.json
+rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_1000.json
 ```
 
 지표:
 
 ```text
-AUC        0.956739
+AUC        0.960505
 HitRate@50 1.000000
-NDCG@50    0.981341
+NDCG@50    0.983664
 ```
 
 명세 `AUC >= 0.70`을 통과했다.
@@ -256,48 +287,101 @@ NDCG@50    0.981341
 
 ## 8. 최종 E2E 평가
 
-### 8.1 최종 평가 명령
+### 8.1 페르소나 적용 후 최신 평가 명령
 
 ```bash
 .venv/bin/python -m rec_models.evaluation.evaluate_recommender \
+  --data data/processed/train_data_dev.csv \
   --top_k 50 \
   --candidate-k 300 \
   --max-users 1000 \
   --use-serving-candidates \
   --skip-popularity-baseline \
-  --output-json rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json
+  --experiment-name dev_e2e_persona_latest_1000 \
+  --split-name dev_latest_20260513 \
+  --output-json rec_models/reports/baseline/dev_e2e_persona_latest_1000.json
 ```
 
-### 8.2 결과
+### 8.2 페르소나 적용 후 최신 결과
 
 ```text
 users evaluated    1000
-HitRate@50         0.497000
-NDCG@50            0.178138
-Coverage@50        0.215203
+HitRate@50         0.491000
+NDCG@50            0.177184
+Coverage@50        0.214607
 ```
 
 명세 통과 여부:
 
 | 지표 | 기준 | 결과 | 판정 |
 |---|---:|---:|---|
-| HitRate@50 | >= 0.20 | 0.497000 | 통과 |
-| NDCG@50 | >= 0.08 | 0.178138 | 통과 |
-| Coverage@50 | >= 0.20 | 0.215203 | 통과 |
+| HitRate@50 | >= 0.20 | 0.491000 | 통과 |
+| NDCG@50 | >= 0.08 | 0.177184 | 통과 |
+| Coverage@50 | >= 0.20 | 0.214607 | 통과 |
 
-### 8.3 Popularity Baseline 비교
+### 8.3 페르소나 적용 전/후 비교
 
-동일 dev 1000 유저 기준 popularity baseline 비교 결과는 다음 파일에 저장되어 있다.
+비교 기준:
+
+- 적용 전: 2026-05-07 최종 채택 dev 결과
+- 적용 후: 2026-05-14 최신 dev 데이터와 9개 페르소나 score 기준 재학습/재평가 결과
+- 공통 조건: `max_users=1000`, `top_k=50`, `candidate_k=300`
+
+| 지표 | 적용 전 | 적용 후 | 변화 | 해석 |
+|---|---:|---:|---:|---|
+| Candidate Recall@300 | 0.614632 | 0.602922 | -0.011710 | 소폭 하락 |
+| Ranking AUC | 0.956739 | 0.960505 | +0.003766 | 소폭 개선 |
+| Ranking HitRate@50 | 1.000000 | 1.000000 | 0.000000 | 유지 |
+| Ranking NDCG@50 | 0.981341 | 0.983664 | +0.002323 | 소폭 개선 |
+| E2E HitRate@50 | 0.497000 | 0.491000 | -0.006000 | 소폭 하락 |
+| E2E NDCG@50 | 0.178138 | 0.177184 | -0.000954 | 거의 동일 |
+| E2E Coverage@50 | 0.215203 | 0.214607 | -0.000597 | 거의 동일 |
+
+페르소나 적용 후 추천 품질은 기존 성능을 거의 유지했다. Ranking 품질은 소폭 개선되었고, E2E 지표는 미세하게 낮아졌지만 모든 명세 기준을 통과한다.
+
+### 8.4 Popularity Baseline 비교
+
+동일 dev 1000 유저 기준 페르소나 적용 모델과 popularity baseline 비교 결과는 다음 파일에 저장되어 있다.
 
 ```text
-rec_models/reports/baseline/dev_e2e_twotower_serving_coverage_strong.json
+rec_models/reports/baseline/dev_e2e_persona_latest_baseline_compare_1000.json
 ```
 
 | 모델 | HitRate@50 | NDCG@50 | Coverage@50 |
 |---|---:|---:|---:|
-| Current Model | 0.592000 | 0.212782 | 0.247172 |
-| Popularity Baseline | 0.346000 | 0.053999 | 0.016647 |
-| Improvement | +0.246000 | +0.158782 | +0.230524 |
+| Persona-applied Current Model | 0.491000 | 0.177184 | 0.214228 |
+| Popularity Baseline | 0.405000 | 0.068926 | 0.015075 |
+| Improvement | +0.086000 | +0.108258 | +0.199153 |
+
+인기순 baseline 대비 HitRate, NDCG, Coverage가 모두 개선되었다. 특히 Coverage 개선폭이 커서, 현재 모델이 단순 인기 아이템 반복 추천보다 더 넓은 item 공간을 사용한다.
+
+### 8.5 5000명 확대 평가
+
+1000명 평가의 표본 안정성을 확인하기 위해 동일 serving 설정에서 5000명 확대 평가를 추가 수행했다.
+
+```bash
+.venv/bin/python -m rec_models.evaluation.evaluate_recommender \
+  --data data/processed/train_data_dev.csv \
+  --top_k 50 \
+  --candidate-k 300 \
+  --max-users 5000 \
+  --use-serving-candidates \
+  --skip-popularity-baseline \
+  --experiment-name dev_e2e_persona_latest_5000 \
+  --split-name dev_latest_20260513 \
+  --output-json rec_models/reports/baseline/dev_e2e_persona_latest_5000.json
+```
+
+결과:
+
+```text
+users evaluated    5000
+HitRate@50         0.480800
+NDCG@50            0.173457
+Coverage@50        0.536535
+```
+
+5000명 확대 평가에서도 HitRate@50, NDCG@50, Coverage@50 모두 명세 기준을 통과했다. Coverage@50은 표본이 커지면서 0.536535까지 상승했다.
 
 ## 9. Serving Latency
 
@@ -313,28 +397,28 @@ Latency는 실제 serving orchestration 함수인 `recommend(user_id, top_n=50)`
 .venv/bin/python -m rec_models.evaluation.measure_serving_latency \
   --top-k 50 \
   --max-users 50 \
-  --output-json rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json
+  --output-json rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json
 ```
 
 Warmup은 서버 시작 시 artifact를 미리 로드하는 비용으로 보고 API request latency에는 포함하지 않는다.
 
-### 9.2 결과
+### 9.2 페르소나 적용 후 최신 결과
 
 ```text
 users measured     50
-warmup_ms          45633.07
-wall avg_ms        127.47
-wall p50_ms        117.22
-wall p95_ms        187.61
-wall max_ms        284.36
+warmup_ms          53221.17
+wall avg_ms        125.43
+wall p50_ms        118.83
+wall p95_ms        162.23
+wall max_ms        275.45
 ```
 
 단계별 평균:
 
 ```text
-candidate_avg_ms   27.20
-ranking_avg_ms     55.58
-reranking_avg_ms   44.60
+candidate_avg_ms   12.86
+ranking_avg_ms     61.24
+reranking_avg_ms   51.24
 ```
 
 명세 `API latency <= 200ms`는 avg/p50/p95 기준으로 통과했다.
@@ -395,11 +479,20 @@ data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt
 data/checkpoints/candidate_dev_history_itemid_fast/two_tower_metadata.json
 rec_models/checkpoints/logreg_dev/ranking_baseline.joblib
 rec_models/checkpoints/logreg_dev/ranking_baseline_metadata.json
-rec_models/reports/candidate_experiments/dev_two_tower_history_itemid_fast_fixed.json
-rec_models/reports/ranking_experiments/dev_ranking_logreg.json
-rec_models/reports/baseline/dev_e2e_twotower_serving_latency_pool75_1000.json
-rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json
+rec_models/reports/candidate_experiments/dev_two_tower_persona_latest_1000.json
+rec_models/reports/ranking_experiments/dev_ranking_logreg_persona_latest_1000.json
+rec_models/reports/baseline/dev_e2e_persona_latest_1000.json
+rec_models/reports/baseline/dev_e2e_persona_latest_baseline_compare_1000.json
+rec_models/reports/baseline/dev_e2e_persona_latest_5000.json
+rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json
 ```
+
+Artifact and Git policy:
+
+- 최종 JSON 리포트 6개는 작고 문서에서 직접 참조하므로 Git 추적 대상이다.
+- `rec_models/checkpoints/logreg_dev` ranking artifact는 Docker 이미지에 포함될 수 있도록 `rec_models/.dockerignore`에서 예외 처리한다.
+- `data/checkpoints/candidate_dev_history_itemid_fast` candidate artifact는 repo-root `data/` 볼륨을 통해 `/app/data`에 마운트하는 운영 전제를 유지한다.
+- 새로운 실험/스모크 리포트와 대용량 checkpoint는 기본적으로 ignore하고, 최종 채택 artifact만 명시적으로 승격한다.
 
 ## 13. 남은 고도화 항목
 
@@ -409,12 +502,12 @@ rec_models/reports/baseline/dev_serving_latency_top50_50users_pool75.json
 - 온라인 reward update 기반 MAB 고도화
 - cold-start 전용 holdout set 구성 및 별도 지표 산출
 - full production data 기준 재평가
-- Docker image 내부 artifact 경로와 최신 checkpoint 동기화 확인
+- candidate artifact 다운로드/생성 bootstrap 자동화
 - 검색 엔진 파트 성능 지표와 통합 리포트 작성
 
 ## 14. 문서 갱신 규칙
 
-- 최종 지표를 다시 측정하면 2장, 8장, 9장을 갱신한다.
+- 최종 지표를 다시 측정하면 2장, 3장, 8장, 9장, 12장을 갱신한다.
 - Candidate checkpoint가 바뀌면 5장과 최종 artifact 목록을 갱신한다.
 - Ranking serving 모델이 바뀌면 6장과 최종 artifact 목록을 갱신한다.
 - Cold-start 전용 평가셋 결과가 생기면 10장을 갱신한다.

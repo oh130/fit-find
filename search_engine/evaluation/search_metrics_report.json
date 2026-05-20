@@ -1,0 +1,509 @@
+{
+  "metadata": {
+    "generated_at": "2026-05-20T08:46:03.113217+00:00",
+    "endpoint": "http://127.0.0.1:8002/search",
+    "mode": "dev",
+    "top_k": 10,
+    "metric_k": 10,
+    "samples_evaluated": 5,
+    "sample_size": 5,
+    "random_seed": 42,
+    "endpoint_health": {
+      "status": "ok",
+      "mode": "dev",
+      "index_size": 600,
+      "image_backed_items": 600,
+      "data_root": "/app/data/processed"
+    },
+    "eval_source_counts": {
+      "catalog_grouped": 5
+    },
+    "query_cache_mode": "disabled_during_evaluation"
+  },
+  "split_summary": {
+    "mode": "dev",
+    "input_file": "C:\\Users\\user\\multimodal-search\\data\\processed\\simulated_events_dev.csv",
+    "ratios": {
+      "train": 0.8,
+      "valid": 0.1,
+      "test": 0.1
+    },
+    "train": {
+      "split": "train",
+      "row_count": 160000,
+      "unique_users": 9033,
+      "unique_sessions": 23479,
+      "event_type_counts": {
+        "search": 24070,
+        "view": 99190,
+        "cart": 30014,
+        "purchase": 6726
+      },
+      "first_timestamp": "2025-01-01T09:00:00",
+      "last_timestamp": "2025-02-07T04:54:37"
+    },
+    "valid": {
+      "split": "valid",
+      "row_count": 20000,
+      "unique_users": 2514,
+      "unique_sessions": 2900,
+      "event_type_counts": {
+        "purchase": 844,
+        "search": 3035,
+        "view": 12340,
+        "cart": 3781
+      },
+      "first_timestamp": "2025-02-07T04:54:47",
+      "last_timestamp": "2025-02-11T18:44:50"
+    },
+    "test": {
+      "split": "test",
+      "row_count": 20000,
+      "unique_users": 2524,
+      "unique_sessions": 2936,
+      "event_type_counts": {
+        "view": 12485,
+        "cart": 3752,
+        "search": 2945,
+        "purchase": 818
+      },
+      "first_timestamp": "2025-02-11T18:44:56",
+      "last_timestamp": "2025-02-16T08:40:44"
+    },
+    "elapsed_seconds": 3.1753
+  },
+  "thresholds": {
+    "latency_ms_max": 200.0,
+    "mrr_min": 0.55,
+    "ndcg_at_10_min": 0.5
+  },
+  "search": {
+    "HitRate@10": 0.9333333333333333,
+    "MRR": 0.7262962962962963,
+    "NDCG@10": 0.6896684141213022,
+    "avg_latency_ms": 345.27706666666666,
+    "p95_latency_ms": 593.0886
+  },
+  "checks": {
+    "latency_within_200ms": false,
+    "mrr_meets_target": true,
+    "ndcg_meets_target": true
+  },
+  "modalities": {
+    "text": {
+      "samples_evaluated": 5,
+      "HitRate@10": 1.0,
+      "MRR": 0.8666666666666668,
+      "NDCG@10": 0.8243410985698233,
+      "avg_latency_ms": 97.8872,
+      "avg_api_latency_ms": 97.8872,
+      "p95_latency_ms": 139.288,
+      "avg_wall_latency_ms": 109.36056680002366,
+      "p95_wall_latency_ms": 149.1345093999371,
+      "checks": {
+        "latency_within_200ms": true,
+        "mrr_meets_target": true,
+        "ndcg_meets_target": true
+      },
+      "rows": [
+        {
+          "query_id": "search_q_0001",
+          "query": "dark blue jacket",
+          "query_product_id": "0647490002",
+          "search_type": "text",
+          "relevant_items": [
+            "0647490002",
+            "0649227001",
+            "0658358003",
+            "0805505001"
+          ],
+          "ranked_items": [
+            "0658358003",
+            "0805505001",
+            "0417088003",
+            "0649227001",
+            "0719758001",
+            "0634789001",
+            "0706459001",
+            "0846607001",
+            "0778784001",
+            "0682289012"
+          ],
+          "latency_ms": 148.394,
+          "wall_latency_ms": 157.44181199988816
+        },
+        {
+          "query_id": "search_q_0002",
+          "query": "black socks",
+          "query_product_id": "0181448105",
+          "search_type": "text",
+          "relevant_items": [
+            "0181448105",
+            "0623653001",
+            "0783707046"
+          ],
+          "ranked_items": [
+            "0783707046",
+            "0706268005",
+            "0623653001",
+            "0181448105",
+            "0714994002",
+            "0770180002",
+            "0738978001",
+            "0734378001",
+            "0749650001",
+            "0585200002"
+          ],
+          "latency_ms": 77.952,
+          "wall_latency_ms": 84.97210700011237
+        },
+        {
+          "query_id": "search_q_0003",
+          "query": "dark blue t-shirt",
+          "query_product_id": "0386859053",
+          "search_type": "text",
+          "relevant_items": [
+            "0386859053",
+            "0617534016"
+          ],
+          "ranked_items": [
+            "0675437001",
+            "0630325002",
+            "0386859053",
+            "0854092003",
+            "0608674003",
+            "0541706002",
+            "0880322003",
+            "0659113001",
+            "0617534016",
+            "0711053011"
+          ],
+          "latency_ms": 102.3,
+          "wall_latency_ms": 115.9052990001328
+        },
+        {
+          "query_id": "search_q_0004",
+          "query": "white vest top",
+          "query_product_id": "0572799002",
+          "search_type": "text",
+          "relevant_items": [
+            "0572799002",
+            "0653941006"
+          ],
+          "ranked_items": [
+            "0653941006",
+            "0572799002",
+            "0830100003",
+            "0880322003",
+            "0854873001",
+            "0294008005",
+            "0715902009",
+            "0541706002",
+            "0659113001",
+            "0870526009"
+          ],
+          "latency_ms": 102.864,
+          "wall_latency_ms": 112.74269599994113
+        },
+        {
+          "query_id": "search_q_0005",
+          "query": "yellowish brown jacket",
+          "query_product_id": "0816363001",
+          "search_type": "text",
+          "relevant_items": [
+            "0816363001",
+            "0846604001"
+          ],
+          "ranked_items": [
+            "0846604001",
+            "0716045002",
+            "0816363001",
+            "0675407002",
+            "0760749001",
+            "0682289012",
+            "0637319002",
+            "0653428003",
+            "0824499003",
+            "0872982001"
+          ],
+          "latency_ms": 57.926,
+          "wall_latency_ms": 75.74092000004384
+        }
+      ]
+    },
+    "image": {
+      "samples_evaluated": 5,
+      "HitRate@10": 0.8,
+      "MRR": 0.65,
+      "NDCG@10": 0.5554341198868398,
+      "avg_latency_ms": 488.5562,
+      "avg_api_latency_ms": 488.5562,
+      "p95_latency_ms": 593.0886,
+      "avg_wall_latency_ms": 534.6418609999546,
+      "p95_wall_latency_ms": 625.6002569999055,
+      "checks": {
+        "latency_within_200ms": false,
+        "mrr_meets_target": true,
+        "ndcg_meets_target": true
+      },
+      "rows": [
+        {
+          "query_id": "search_q_0001",
+          "query": "dark blue jacket",
+          "query_product_id": "0647490002",
+          "search_type": "image",
+          "relevant_items": [
+            "0649227001",
+            "0658358003",
+            "0805505001"
+          ],
+          "ranked_items": [
+            "0649227001",
+            "0579125004",
+            "0683639009",
+            "0485551009",
+            "0417088003",
+            "0846604001",
+            "0625114006",
+            "0806184003",
+            "0296476008"
+          ],
+          "latency_ms": 490.255,
+          "wall_latency_ms": 560.7546089997868
+        },
+        {
+          "query_id": "search_q_0002",
+          "query": "black socks",
+          "query_product_id": "0181448105",
+          "search_type": "image",
+          "relevant_items": [
+            "0623653001",
+            "0783707046"
+          ],
+          "ranked_items": [
+            "0783707046",
+            "0706268005",
+            "0585200002",
+            "0623653001",
+            "0631536018",
+            "0375248028",
+            "0657395007",
+            "0770180002",
+            "0675662023"
+          ],
+          "latency_ms": 492.087,
+          "wall_latency_ms": 540.176122000048
+        },
+        {
+          "query_id": "search_q_0003",
+          "query": "dark blue t-shirt",
+          "query_product_id": "0386859053",
+          "search_type": "image",
+          "relevant_items": [
+            "0617534016"
+          ],
+          "ranked_items": [
+            "0542533015",
+            "0541706002",
+            "0623859006",
+            "0569984024",
+            "0758252003",
+            "0674243002",
+            "0608674003",
+            "0880322003",
+            "0564309013"
+          ],
+          "latency_ms": 406.343,
+          "wall_latency_ms": 446.6364310001154
+        },
+        {
+          "query_id": "search_q_0004",
+          "query": "white vest top",
+          "query_product_id": "0572799002",
+          "search_type": "image",
+          "relevant_items": [
+            "0653941006"
+          ],
+          "ranked_items": [
+            "0653941006",
+            "0294008005",
+            "0880322003",
+            "0651327001",
+            "0541706002",
+            "0830100003",
+            "0873552005",
+            "0854873001",
+            "0757813005"
+          ],
+          "latency_ms": 618.339,
+          "wall_latency_ms": 641.8116689999351
+        },
+        {
+          "query_id": "search_q_0005",
+          "query": "yellowish brown jacket",
+          "query_product_id": "0816363001",
+          "search_type": "image",
+          "relevant_items": [
+            "0846604001"
+          ],
+          "ranked_items": [
+            "0716045002",
+            "0653428003",
+            "0682289012",
+            "0846604001",
+            "0675407002",
+            "0729620002",
+            "0824499003",
+            "0556424001",
+            "0578487006"
+          ],
+          "latency_ms": 435.757,
+          "wall_latency_ms": 483.83047399988754
+        }
+      ]
+    },
+    "hybrid": {
+      "samples_evaluated": 5,
+      "HitRate@10": 1.0,
+      "MRR": 0.6622222222222223,
+      "NDCG@10": 0.6892300239072433,
+      "avg_latency_ms": 449.38779999999997,
+      "avg_api_latency_ms": 449.38779999999997,
+      "p95_latency_ms": 479.7304,
+      "avg_wall_latency_ms": 493.4969176001232,
+      "p95_wall_latency_ms": 550.5917646001308,
+      "checks": {
+        "latency_within_200ms": false,
+        "mrr_meets_target": true,
+        "ndcg_meets_target": true
+      },
+      "rows": [
+        {
+          "query_id": "search_q_0001",
+          "query": "dark blue jacket",
+          "query_product_id": "0647490002",
+          "search_type": "hybrid",
+          "relevant_items": [
+            "0649227001",
+            "0658358003",
+            "0805505001"
+          ],
+          "ranked_items": [
+            "0658358003",
+            "0579125004",
+            "0417088003",
+            "0649227001",
+            "0719758001",
+            "0805505001",
+            "0682289012",
+            "0538706002",
+            "0596981001"
+          ],
+          "latency_ms": 484.945,
+          "wall_latency_ms": 567.0474380001451
+        },
+        {
+          "query_id": "search_q_0002",
+          "query": "black socks",
+          "query_product_id": "0181448105",
+          "search_type": "hybrid",
+          "relevant_items": [
+            "0623653001",
+            "0783707046"
+          ],
+          "ranked_items": [
+            "0783707046",
+            "0706268005",
+            "0623653001",
+            "0585200002",
+            "0770180002",
+            "0375248028",
+            "0714994002",
+            "0776887001",
+            "0698618001"
+          ],
+          "latency_ms": 431.926,
+          "wall_latency_ms": 484.7690710000734
+        },
+        {
+          "query_id": "search_q_0003",
+          "query": "dark blue t-shirt",
+          "query_product_id": "0386859053",
+          "search_type": "hybrid",
+          "relevant_items": [
+            "0617534016"
+          ],
+          "ranked_items": [
+            "0541706002",
+            "0854092003",
+            "0608674003",
+            "0880322003",
+            "0711053011",
+            "0623859006",
+            "0675437001",
+            "0542533015",
+            "0617534016"
+          ],
+          "latency_ms": 458.872,
+          "wall_latency_ms": 482.9494570001316
+        },
+        {
+          "query_id": "search_q_0004",
+          "query": "white vest top",
+          "query_product_id": "0572799002",
+          "search_type": "hybrid",
+          "relevant_items": [
+            "0653941006"
+          ],
+          "ranked_items": [
+            "0653941006",
+            "0294008005",
+            "0880322003",
+            "0830100003",
+            "0541706002",
+            "0651327001",
+            "0873552005",
+            "0854873001",
+            "0757813005"
+          ],
+          "latency_ms": 444.183,
+          "wall_latency_ms": 467.5490690001425
+        },
+        {
+          "query_id": "search_q_0005",
+          "query": "yellowish brown jacket",
+          "query_product_id": "0816363001",
+          "search_type": "hybrid",
+          "relevant_items": [
+            "0846604001"
+          ],
+          "ranked_items": [
+            "0716045002",
+            "0653428003",
+            "0682289012",
+            "0729620002",
+            "0846604001",
+            "0675407002",
+            "0824499003",
+            "0658358003",
+            "0719758001"
+          ],
+          "latency_ms": 427.013,
+          "wall_latency_ms": 465.1695530001234
+        }
+      ]
+    }
+  },
+  "baseline": {
+    "name": "BM25 text-only",
+    "text": {
+      "MRR": 1.0,
+      "NDCG@10": 1.0,
+      "HitRate@10": 1.0
+    },
+    "text_improvement": {
+      "MRR_delta": -0.1333333333333332,
+      "NDCG@10_delta": -0.1756589014301767
+    }
+  }
+}

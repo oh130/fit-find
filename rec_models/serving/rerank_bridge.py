@@ -16,9 +16,10 @@ DEFAULT_EXPLORATION_RATIO = 0.6
 DEFAULT_MAX_EXPLORATION_SLOTS = 30
 DEFAULT_NEW_ITEM_WINDOW_DAYS = 7
 DEFAULT_SOFT_DIVERSITY_PENALTY = 0.003
-DEFAULT_SOFT_POPULARITY_PENALTY = 0.004
+DEFAULT_SOFT_LONG_TAIL_PENALTY = 0.004
 DEFAULT_SOFT_FRESHNESS_BOOST = 0.002
 DEFAULT_SOFT_PRICE_PENALTY = 0.002
+DEFAULT_PERSONALIZATION_BLEND_STRENGTH = 0.035
 DEFAULT_SCORE_GAP_GUARD = 0.01
 MAX_RERANK_WEIGHT = 5.0
 
@@ -35,7 +36,9 @@ class RerankWeights:
     diversity: float = 1.0
     exploration: float = 1.0
     freshness: float = 1.0
-    popularity: float = 1.0
+    personalization: float = 1.0
+    popularity: float = 0.0
+    long_tail: float = 1.0
     price: float = 1.0
 
 
@@ -57,14 +60,22 @@ def normalize_rerank_weights(weights: Mapping[str, Any] | RerankWeights | None =
 
     raw = dict(weights or {})
 
-    def pick(short_key: str) -> float:
-        return _coerce_weight(raw.get(f"{short_key}_weight", raw.get(short_key)), default=1.0)
+    def pick(short_key: str, default: float = 1.0) -> float:
+        return _coerce_weight(raw.get(f"{short_key}_weight", raw.get(short_key)), default=default)
+
+    # Backward compatibility: older callers used popularity_weight as a
+    # long-tail pressure. The frontend now uses it as an actual popularity
+    # preference, so keep the old pressure only when no popularity override is
+    # provided.
+    explicit_popularity = "popularity_weight" in raw or "popularity" in raw
 
     return RerankWeights(
         diversity=pick("diversity"),
         exploration=pick("exploration"),
         freshness=pick("freshness"),
-        popularity=pick("popularity"),
+        personalization=pick("personalization"),
+        popularity=pick("popularity", default=0.0),
+        long_tail=pick("long_tail", default=0.0 if explicit_popularity else 1.0),
         price=pick("price"),
     )
 
@@ -72,6 +83,13 @@ def normalize_rerank_weights(weights: Mapping[str, Any] | RerankWeights | None =
 def _safe_category(row: dict[str, Any]) -> str:
     category = str(row.get("main_category") or row.get("category") or "UNKNOWN").strip()
     return category or "UNKNOWN"
+
+
+def _normalize_article_id(value: Any) -> str:
+    article_id = str(value or "").strip()
+    if article_id.isdigit():
+        return article_id.zfill(10)
+    return article_id
 
 
 def _sort_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
@@ -167,13 +185,24 @@ def apply_soft_greedy_rerank(
     pool["category_rank"] = pool.groupby("category_key", sort=False).cumcount()
     pool["soft_score"] = pool["base_score"]
 
+    if weights.personalization > 0 or weights.popularity > 0:
+        base_norm = _normalize_series(pool["base_score"])
+        preference_total = max(weights.personalization + weights.popularity, 1e-9)
+        preference_score = (
+            (base_norm * weights.personalization)
+            + (pool["popularity_norm"] * weights.popularity)
+        ) / preference_total
+        pool["soft_score"] = pool["soft_score"] + (
+            (preference_score - base_norm) * DEFAULT_PERSONALIZATION_BLEND_STRENGTH
+        )
+
     if enable_diversity:
         diversity_penalty = DEFAULT_SOFT_DIVERSITY_PENALTY * weights.diversity
         pool["soft_score"] = pool["soft_score"] - (pool["category_rank"] * diversity_penalty)
 
-    if enable_exploration:
-        popularity_penalty = DEFAULT_SOFT_POPULARITY_PENALTY * weights.popularity
-        pool["soft_score"] = pool["soft_score"] - (pool["popularity_norm"] * popularity_penalty)
+    if enable_exploration and weights.long_tail > 0:
+        long_tail_penalty = DEFAULT_SOFT_LONG_TAIL_PENALTY * weights.long_tail
+        pool["soft_score"] = pool["soft_score"] - (pool["popularity_norm"] * long_tail_penalty)
 
     if weights.price > 1.0:
         price_pressure = DEFAULT_SOFT_PRICE_PENALTY * (weights.price - 1.0)
@@ -230,11 +259,24 @@ def _compute_exploration_slots(
 def _pick_reason(row: dict[str, Any], exploration_reason: str | None = None) -> str:
     if exploration_reason is not None:
         return exploration_reason
-    return str(row.get("reason", "ranking_score"))
+    reason = row.get("reason", "ranking_score")
+    if pd.isna(reason):
+        return "ranking_score"
+    return str(reason)
 
 
 def _image_url_for_article(article_id: str) -> str:
     return f"/api/images/{article_id}"
+
+
+def _display_scores(raw_scores: pd.Series) -> list[float]:
+    """Scale final raw scores for UI display while preserving rank ratios."""
+
+    scores = pd.to_numeric(raw_scores, errors="coerce").fillna(0.0).clip(lower=0.0)
+    max_score = float(scores.max()) if not scores.empty else 0.0
+    if max_score <= 0.0:
+        return [0.0 for _ in range(len(scores))]
+    return (scores / max_score).clip(upper=1.0).astype(float).tolist()
 
 
 def select_exploration_candidates(
@@ -244,9 +286,10 @@ def select_exploration_candidates(
     epsilon: float = DEFAULT_EXPLORATION_EPSILON,
     enable_freshness: bool = True,
     rerank_weights: Mapping[str, Any] | RerankWeights | None = None,
+    bandit_scores: Mapping[str, float] | None = None,
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
-    """Select exploration candidates using epsilon-greedy priorities."""
+    """Select exploration candidates using reward-aware epsilon-greedy priorities."""
 
     if remaining_candidates.empty or exploration_slots <= 0:
         return remaining_candidates.head(0).copy()
@@ -272,6 +315,13 @@ def select_exploration_candidates(
     candidates["popularity_norm"] = _normalize_series(candidates.get("popularity", pd.Series(0.0, index=candidates.index)))
     candidates["price_norm"] = _normalized_price(candidates)
     candidates["score_norm"] = _normalize_series(candidates.get("score", pd.Series(0.0, index=candidates.index)))
+    raw_bandit_scores = dict(bandit_scores or {})
+    candidates["bandit_ucb_score"] = (
+        candidates["article_id"]
+        .map(lambda article_id: float(raw_bandit_scores.get(_normalize_article_id(article_id), 0.0)))
+        .fillna(0.0)
+    )
+    candidates["bandit_ucb_norm"] = _normalize_series(candidates["bandit_ucb_score"])
     candidates["coverage_exploration_flag"] = (
         candidates.get("candidate_reason", pd.Series("", index=candidates.index))
         .astype(str)
@@ -293,21 +343,26 @@ def select_exploration_candidates(
         candidates["exploration_score"] = (
             candidates["score_norm"] * 0.25
             - candidates["category_penalty"] * (0.20 * weights.diversity)
-            - candidates["popularity_norm"] * (0.25 * weights.popularity)
+            - candidates["popularity_norm"] * (0.25 * weights.long_tail)
+            + candidates["popularity_norm"] * (0.20 * weights.popularity)
             - candidates["price_norm"] * price_pressure
             + candidates["coverage_exploration_flag"] * (2.00 * weights.exploration)
+            + candidates["bandit_ucb_norm"] * (0.60 * weights.exploration)
             + freshness_mask.astype(float) * (0.30 * weights.freshness)
             + candidates["random_tiebreaker"] * (0.20 * weights.exploration)
         )
         ordered = candidates.sort_values(["exploration_score", "score", "article_id"], ascending=[False, False, True]).copy()
         ordered.loc[:, "reason"] = "mab_exploration"
+        ordered.loc[ordered["bandit_ucb_score"].gt(0), "reason"] = "bandit_reward_exploration"
         ordered.loc[freshness_mask & ~coverage_mask, "reason"] = "new_item_boost"
     else:
         ordered = candidates.sort_values(["score", "popularity", "article_id"], ascending=[False, False, True]).copy()
         ordered.loc[:, "reason"] = ordered["reason"].fillna("ranking_score")
 
     selected = ordered.head(min(exploration_slots, len(ordered))).copy()
-    selected.loc[:, "is_exploration"] = selected["reason"].isin({"mab_exploration", "new_item_boost"})
+    selected.loc[:, "is_exploration"] = selected["reason"].isin(
+        {"mab_exploration", "bandit_reward_exploration", "new_item_boost"}
+    )
     return selected
 
 
@@ -381,6 +436,7 @@ def rerank_recommendations(
     enable_exploration: bool = True,
     enable_freshness: bool = True,
     rerank_weights: Mapping[str, Any] | RerankWeights | None = None,
+    bandit_scores: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply service-level reranking with diversity, freshness, and exploration."""
 
@@ -435,6 +491,7 @@ def rerank_recommendations(
             epsilon=epsilon,
             enable_freshness=enable_freshness,
             rerank_weights=weights,
+            bandit_scores=bandit_scores,
             rng=rng,
         )
         combined = inject_exploration_slots(primary_ranked=primary_ranked, exploration_candidates=exploration_ranked, top_n=effective_top_n)
@@ -446,13 +503,15 @@ def rerank_recommendations(
     else:
         final_ranked = combined.head(effective_top_n).copy()
 
+    display_scores = _display_scores(final_ranked.get("score", pd.Series(0.0, index=final_ranked.index)))
+
     recommendations: list[dict[str, Any]] = []
-    for row in final_ranked.to_dict(orient="records"):
+    for row, display_score in zip(final_ranked.to_dict(orient="records"), display_scores, strict=False):
         product_id = str(row.get("article_id", ""))
         recommendations.append(
             {
                 "product_id": product_id,
-                "score": float(row.get("score", 0.0)),
+                "score": display_score,
                 "reason": _pick_reason(row),
                 "is_exploration": bool(row.get("is_exploration", False)),
                 "image_url": _image_url_for_article(product_id),

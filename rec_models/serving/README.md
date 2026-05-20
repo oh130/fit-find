@@ -27,18 +27,21 @@
 
 - Candidate checkpoint:
   - `data/checkpoints/candidate_dev_history_itemid_fast/two_tower.pt`
+  - fallback: `data/checkpoints/candidate_dev_history_lolo_fast/two_tower.pt`, `data/checkpoints/candidate/two_tower.pt`
 - Ranking checkpoint:
   - `rec_models/checkpoints/logreg_dev/ranking_baseline.joblib`
+  - fallback: `rec_models/checkpoints/ranking_baseline.joblib`
 - Serving candidate pool:
   - top-50 요청 기준 75개 후보를 생성해 ranking/reranking에 전달
 - Reranking:
   - category diversity guard
   - epsilon-greedy exploration slot
+  - Redis reward update 기반 item-level UCB exploration score
   - freshness/new item boost
   - coverage exploration priority
-  - optional priority weights: `price_weight`, `popularity_weight`, `diversity_weight`, `freshness_weight`, `exploration_weight`
+  - optional priority weights: `persona_hint`, `personalization_weight`, `popularity_weight`, `price_weight`, `diversity_weight`, `freshness_weight`, `exploration_weight`, `long_tail_weight`
 
-우선순위 가중치는 `0.0`~`5.0` 범위로 받으며, 기본값 `1.0`은 현재 평가 통과 기준 추천 정책과 동일하다. API Gateway는 `/api/recommend` 쿼리 파라미터를 rec-models `/recommend`로 그대로 전달한다.
+우선순위 가중치는 `0.0`~`5.0` 범위로 받는다. `personalization_weight`와 `popularity_weight`는 최종 reranking에서 모델 개인화 점수와 인기 점수의 혼합 비율을 조절한다. `persona_hint`는 카테고리 관심도 floor와 페르소나별 가격/다양성/신상품/탐색 보정 profile을 함께 적용한다. API Gateway는 `/api/recommend` 쿼리 파라미터를 rec-models `/recommend`로 그대로 전달한다. `/session/update`는 click/cart/purchase reward를 Redis에 누적하고, exploration 후보 선택 시 item-level UCB score로 반영한다.
 
 검증 결과:
 

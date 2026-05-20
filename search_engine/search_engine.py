@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
+import hashlib
 import logging
 import os
 import time
@@ -18,6 +21,7 @@ import pandas as pd
 import torch
 from PIL import Image, ImageDraw
 from transformers import CLIPModel, CLIPProcessor
+from query_expansion import expand_fashion_query
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +30,33 @@ os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
 CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "openai/clip-vit-base-patch32")
 DEFAULT_TOP_K = 10
 DEFAULT_PORT = 8002
+DEFAULT_RANDOM_SEED = 42
+DEFAULT_DEV_SAMPLE_SIZE = 600
+SEARCH_PAIR_MANIFEST_DEV = "search_pairs_dev.csv"
+SEARCH_PAIR_MANIFEST_PROD = "search_pairs_production.csv"
+CSV_STRING_COLUMNS = {
+    "article_id": str,
+    "product_code": str,
+    "prod_name": str,
+    "product_type_name": str,
+    "product_group_name": str,
+    "graphical_appearance_name": str,
+    "colour_group_name": str,
+    "perceived_colour_master_name": str,
+    "perceived_colour_value_name": str,
+    "department_name": str,
+    "index_name": str,
+    "index_group_name": str,
+    "section_name": str,
+    "garment_group_name": str,
+    "detail_desc": str,
+    "category": str,
+    "main_category": str,
+    "color": str,
+    "category_l1": str,
+    "category_l2": str,
+    "category_l3": str,
+}
 
 
 class _NumpyInnerProductIndex:
@@ -64,6 +95,7 @@ class SearchItem:
     price: float
     description: str
     image: Optional[Image.Image]
+    image_path: Optional[str]
     metadata: Dict[str, Any]
 
 
@@ -81,6 +113,14 @@ def encode_image_file(path: Path | str) -> Optional[Image.Image]:
         return None
 
 
+def normalize_article_id(value: object) -> str:
+    raw = str(value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return raw
+    return digits[-10:].zfill(10)
+
+
 class OpenAIClipEmbedder:
     # 텍스트/이미지를 OpenAI CLIP 공통 임베딩 공간으로 변환한다.
     def __init__(
@@ -96,6 +136,8 @@ class OpenAIClipEmbedder:
         self.processor: Optional[CLIPProcessor] = None
         self.dim: Optional[int] = None
         self._load_error: Optional[Exception] = None
+        self._text_cache: Dict[str, np.ndarray] = {}
+        self._image_cache: Dict[str, np.ndarray] = {}
         self._ensure_loaded()
 
     def _ensure_loaded(self) -> None:
@@ -159,11 +201,15 @@ class OpenAIClipEmbedder:
             return vector
         return vector / norm
 
-    def embed_text(self, text: str) -> np.ndarray:
+    def embed_text(self, text: str, use_cache: bool = True) -> np.ndarray:
         model, processor, dim = self._require_components()
         value = (text or "").strip()
         if not value:
             return np.zeros(dim, dtype=np.float32)
+        if use_cache:
+            cached = self._text_cache.get(value)
+            if cached is not None:
+                return cached.copy()
         # text tower의 pooled output을 projection layer로 512차원 CLIP 공간에 투영한다.
         inputs = processor(text=[value], return_tensors="pt", padding=True, truncation=True)
         inputs = {key: tensor.to(self.device) for key, tensor in inputs.items()}
@@ -175,7 +221,10 @@ class OpenAIClipEmbedder:
             pooled = text_outputs[1]
             features = model.text_projection(pooled)
             features = torch.nn.functional.normalize(features, dim=-1)
-        return self._normalize(features[0].detach().cpu().numpy())
+        embedding = self._normalize(features[0].detach().cpu().numpy())
+        if use_cache:
+            self._text_cache[value] = embedding.copy()
+        return embedding
 
     def embed_image(self, image: Image.Image) -> np.ndarray:
         model, processor, _ = self._require_components()
@@ -189,6 +238,37 @@ class OpenAIClipEmbedder:
             features = model.visual_projection(pooled)
             features = torch.nn.functional.normalize(features, dim=-1)
         return self._normalize(features[0].detach().cpu().numpy())
+
+    @staticmethod
+    def _hash_image_bytes(image_bytes: bytes) -> str:
+        return hashlib.sha256(image_bytes).hexdigest()
+
+    def register_image_bytes_embedding(self, image_bytes: bytes, embedding: np.ndarray) -> None:
+        self._image_cache[self._hash_image_bytes(image_bytes)] = self._normalize(embedding).copy()
+
+    def register_image_file_embedding(self, image_path: str | Path, embedding: np.ndarray) -> None:
+        path = Path(image_path)
+        if not path.exists():
+            return
+        try:
+            self.register_image_bytes_embedding(path.read_bytes(), embedding)
+        except Exception:
+            return
+
+    def embed_image_bytes(self, image_bytes: bytes, use_cache: bool = True) -> np.ndarray:
+        _, _, dim = self._require_components()
+        if not image_bytes:
+            return np.zeros(dim, dtype=np.float32)
+        cache_key = self._hash_image_bytes(image_bytes)
+        if use_cache:
+            cached = self._image_cache.get(cache_key)
+            if cached is not None:
+                return cached.copy()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        embedding = self.embed_image(image)
+        if use_cache:
+            self._image_cache[cache_key] = embedding.copy()
+        return embedding
 
     def combine_embeddings(self, vectors: Sequence[np.ndarray]) -> np.ndarray:
         # hybrid 검색은 텍스트/이미지 벡터를 평균낸 뒤 다시 정규화한다.
@@ -207,14 +287,25 @@ class OpenAIClipEmbedder:
             vectors.append(self.embed_image(image))
         return self.combine_embeddings(vectors)
 
-    def embed_query(self, text: Optional[str] = None, image: Optional[Image.Image] = None) -> Tuple[np.ndarray, str]:
+    def embed_query(
+        self,
+        text: Optional[str] = None,
+        image: Optional[Image.Image] = None,
+        image_bytes: Optional[bytes] = None,
+        use_cache: bool = True,
+    ) -> Tuple[np.ndarray, str]:
         has_text = bool(text and text.strip())
-        has_image = image is not None
+        has_image = image is not None or bool(image_bytes)
+        image_embedding = None
+        if image_bytes:
+            image_embedding = self.embed_image_bytes(image_bytes, use_cache=use_cache)
+        elif image is not None:
+            image_embedding = self.embed_image(image)
         if has_text and has_image:
-            return self.combine_embeddings([self.embed_text(text or ""), self.embed_image(image)]), "hybrid"
+            return self.combine_embeddings([self.embed_text(text or "", use_cache=use_cache), image_embedding]), "hybrid"
         if has_image:
-            return self.embed_image(image), "image"
-        return self.embed_text(text or ""), "text"
+            return image_embedding, "image"
+        return self.embed_text(text or "", use_cache=use_cache), "text"
 
     def project_external_embedding(self, embedding: np.ndarray, modality: str = "text") -> np.ndarray:
         # app.py 등 외부 코드가 만든 임베딩도 CLIP 검색 공간 차원에 맞춰 흡수한다.
@@ -272,18 +363,29 @@ class MultimodalSearchEngine:
         clip_model_name: str = CLIP_MODEL_NAME,
     ) -> None:
         self.mode = (mode or "test").lower().strip()
-        self.data_root = self._resolve_data_root(data_root)
+        self.data_root = self._resolve_runtime_data_root(data_root)
         self.top_k_default = int(top_k_default)
+        self.random_seed = int(os.getenv("SEARCH_ENGINE_RANDOM_SEED", str(DEFAULT_RANDOM_SEED)))
+        self.dev_sample_size = int(os.getenv("SEARCH_ENGINE_DEV_SAMPLE_SIZE", str(DEFAULT_DEV_SAMPLE_SIZE)))
         self.embedder = OpenAIClipEmbedder(model_name=clip_model_name)
         self.items: List[SearchItem] = []
         self.item_ids: List[str] = []
         self._embeddings: Optional[np.ndarray] = None
+        self._text_embeddings: Optional[np.ndarray] = None
+        self._image_embeddings: Optional[np.ndarray] = None
+        self._image_item_indices: np.ndarray = np.empty((0,), dtype=np.int64)
+        self._image_hash_to_item_index: Dict[str, int] = {}
+        self._aux_vectors_path: Optional[Path] = None
         self.index: Any = None
+        self.text_index: Any = None
+        self.image_index: Any = None
         self.dimension = int(self.embedder.dim or 512)
         self._is_built = False
 
         if self.mode == "production":
             self.items = self._load_production_items()
+        elif self.mode == "dev":
+            self.items = self._load_dev_items()
         else:
             self.items = self._build_dummy_items()
 
@@ -314,6 +416,52 @@ class MultimodalSearchEngine:
 
         for candidate in candidates:
             if candidate:
+                return Path(candidate)
+        return project_root / "data"
+
+    @staticmethod
+    def _resolve_runtime_data_root(data_root: Optional[str]) -> Path:
+        if data_root:
+            path = Path(data_root)
+            if (path / "articles.csv").exists():
+                return path
+            if (path / "articles_feature.csv").exists():
+                return path
+            if (path / "item_master_dev.csv").exists():
+                return path
+            if (path / "item_master.csv").exists():
+                return path
+            if (path / "raw" / "articles.csv").exists():
+                return path / "raw"
+            return path
+
+        env_root = os.getenv("SEARCH_ENGINE_DATA_ROOT") or os.getenv("DATA_ROOT")
+        file_dir = Path(__file__).resolve().parent
+        project_root = file_dir.parent
+        candidates = [
+            Path(env_root) if env_root else None,
+            file_dir / "data",
+            project_root / "data",
+            Path("/app/data"),
+        ]
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(candidate)
+            if (path / "articles.csv").exists():
+                return path
+            if (path / "articles_feature.csv").exists():
+                return path
+            if (path / "item_master_dev.csv").exists():
+                return path
+            if (path / "item_master.csv").exists():
+                return path
+            if (path / "raw" / "articles.csv").exists():
+                return path / "raw"
+
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
                 return Path(candidate)
         return project_root / "data"
 
@@ -358,8 +506,10 @@ class MultimodalSearchEngine:
                     price=float(price),
                     description=desc,
                     image=img,
+                    image_path=None,
                     metadata={
                         "mode": "test",
+                        "product_id": product_id,
                         "category": name.split()[0].lower(),
                         "name": name,
                         "description": desc,
@@ -370,56 +520,292 @@ class MultimodalSearchEngine:
         LOGGER.info("Prepared %d dummy items for test mode", len(items))
         return items
 
+    def _article_table_candidates(self, mode_label: str) -> List[Path]:
+        local_root = Path(__file__).resolve().parent
+        if mode_label == "dev":
+            preferred = [
+                local_root / SEARCH_PAIR_MANIFEST_DEV,
+                self.data_root / SEARCH_PAIR_MANIFEST_DEV,
+                self.data_root / "item_master_dev.csv",
+                self.data_root / "articles_feature.csv",
+            ]
+        elif mode_label == "production":
+            preferred = [
+                local_root / SEARCH_PAIR_MANIFEST_PROD,
+                self.data_root / SEARCH_PAIR_MANIFEST_PROD,
+                self.data_root / "item_master.csv",
+                self.data_root / "articles_feature.csv",
+                self.data_root / "item_master_dev.csv",
+            ]
+        else:
+            preferred = [self.data_root / "articles.csv"]
+        fallback = [
+            self.data_root / "articles.csv",
+            self.data_root / "raw" / "articles.csv",
+            self.data_root.parent / "raw" / "articles.csv",
+        ]
+        return preferred + fallback
+
+    def _raw_article_candidates(self) -> List[Path]:
+        return [
+            self.data_root / "articles.csv",
+            self.data_root / "raw" / "articles.csv",
+            self.data_root.parent / "raw" / "articles.csv",
+        ]
+
+    def _feature_article_candidates(self, mode_label: str) -> List[Path]:
+        base_candidates = [
+            self.data_root / "articles_feature.csv",
+            self.data_root / "item_master_dev.csv",
+            self.data_root / "item_master.csv",
+            self.data_root.parent / "processed" / "articles_feature.csv",
+            self.data_root.parent / "processed" / "item_master_dev.csv",
+            self.data_root.parent / "processed" / "item_master.csv",
+        ]
+        if mode_label == "production":
+            return base_candidates
+        if mode_label == "dev":
+            return base_candidates
+        return []
+
+    def _merge_article_features(self, raw_articles: pd.DataFrame, mode_label: str) -> pd.DataFrame:
+        merged = raw_articles.copy()
+        merged["article_id"] = merged["article_id"].apply(self._normalize_article_id)
+
+        for path in self._feature_article_candidates(mode_label):
+            if not path.exists():
+                continue
+            try:
+                feature_df = pd.read_csv(path, dtype=CSV_STRING_COLUMNS).fillna("")
+            except Exception as exc:
+                LOGGER.warning("Failed to load feature article table from %s: %s", path, exc)
+                continue
+
+            if "article_id" not in feature_df.columns:
+                continue
+
+            feature_df["article_id"] = feature_df["article_id"].apply(self._normalize_article_id)
+            feature_df = feature_df.drop_duplicates(subset=["article_id"])
+            merged = merged.merge(feature_df, on="article_id", how="left", suffixes=("", "_feature"))
+
+            for column in list(merged.columns):
+                if not column.endswith("_feature"):
+                    continue
+                base_column = column[:-8]
+                if base_column not in merged.columns:
+                    merged[base_column] = merged[column]
+                else:
+                    merged[base_column] = merged[base_column].where(
+                        merged[base_column].astype(str).str.strip().ne(""),
+                        merged[column],
+                    )
+                merged = merged.drop(columns=[column])
+            return merged.fillna("")
+
+        return merged.fillna("")
+
+    def _load_article_table(self, mode_label: str) -> Tuple[pd.DataFrame, Path]:
+        for path in self._article_table_candidates(mode_label):
+            if not path.exists():
+                continue
+            try:
+                frame = pd.read_csv(path, dtype=CSV_STRING_COLUMNS).fillna("")
+                if not frame.empty:
+                    return frame, path
+            except Exception as exc:
+                LOGGER.warning("Failed to load article table from %s: %s", path, exc)
+        for path in self._raw_article_candidates():
+            if not path.exists():
+                continue
+            try:
+                raw_articles = pd.read_csv(path, dtype=CSV_STRING_COLUMNS).fillna("")
+            except Exception as exc:
+                LOGGER.warning("Failed to load raw article table from %s: %s", path, exc)
+                continue
+            if raw_articles.empty:
+                continue
+            return self._merge_article_features(raw_articles, mode_label), path
+        raise FileNotFoundError(f"No article table found for mode={mode_label} under {self.data_root}")
+
+    @staticmethod
+    def _normalize_article_id(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            return raw
+        return digits[-10:].zfill(10)
+
+    @staticmethod
+    def _extract_price_from_row(row: pd.Series) -> float:
+        for key in ("price", "price_mean", "avg_price"):
+            value = row.get(key, "")
+            try:
+                if value != "":
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _manifest_output_path(self, mode_label: str) -> Path:
+        processed_root = Path(__file__).resolve().parent
+        filename = SEARCH_PAIR_MANIFEST_DEV if mode_label == "dev" else SEARCH_PAIR_MANIFEST_PROD
+        return processed_root / filename
+
+    def _write_pair_manifest(self, items: Sequence[SearchItem], mode_label: str, source_articles_path: Path) -> None:
+        manifest_path = self._manifest_output_path(mode_label)
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            rows: List[Dict[str, Any]] = []
+            for item in items:
+                metadata = dict(item.metadata or {})
+                rows.append(
+                    {
+                        "article_id": item.product_id,
+                        "product_id": item.product_id,
+                        "prod_name": metadata.get("product_name", item.name),
+                        "product_type_name": metadata.get("product_type_name", ""),
+                        "product_group_name": metadata.get("product_group_name", ""),
+                        "graphical_appearance_name": metadata.get("graphical_appearance_name", ""),
+                        "colour_group_name": metadata.get("colour_group_name", ""),
+                        "perceived_colour_master_name": metadata.get("perceived_colour_master_name", ""),
+                        "perceived_colour_value_name": metadata.get("perceived_colour_value_name", ""),
+                        "department_name": metadata.get("department_name", ""),
+                        "index_name": metadata.get("index_name", ""),
+                        "index_group_name": metadata.get("index_group_name", ""),
+                        "section_name": metadata.get("section_name", ""),
+                        "garment_group_name": metadata.get("garment_group_name", ""),
+                        "detail_desc": metadata.get("detail_desc", ""),
+                        "category": metadata.get("category", ""),
+                        "main_category": metadata.get("main_category", ""),
+                        "category_l1": metadata.get("category_l1", ""),
+                        "category_l2": metadata.get("category_l2", ""),
+                        "category_l3": metadata.get("category_l3", ""),
+                        "price_mean": item.price,
+                        "image_path": item.image_path or "",
+                        "image_available": bool(item.image_path or item.image is not None),
+                        "source_articles_path": str(source_articles_path),
+                    }
+                )
+            pd.DataFrame(rows).to_csv(manifest_path, index=False, encoding="utf-8-sig")
+            LOGGER.info("Wrote %s search pair manifest to %s", mode_label, manifest_path)
+        except Exception as exc:
+            LOGGER.warning("Failed to write %s pair manifest: %s", mode_label, exc)
+
+    def _expand_query_terms(self, text: str) -> str:
+        return expand_fashion_query(text)
+
+    def _build_item_from_article_row(self, row: pd.Series, price_map: Dict[str, float], mode_label: str) -> Optional[SearchItem]:
+        article_id = self._article_id(row)
+        if not article_id:
+            return None
+
+        name = self._build_article_name(row)
+        description = self._build_semantic_article_description(row)
+        precomputed_image_path = str(row.get("image_path", "")).strip()
+        image_path = None
+        if precomputed_image_path:
+            candidate = Path(precomputed_image_path)
+            try:
+                if candidate.exists():
+                    image_path = candidate
+            except OSError:
+                image_path = None
+        if image_path is None:
+            image_path = self._locate_article_image_path(row)
+        image = encode_image_file(image_path) if image_path is not None else None
+        price = float(price_map.get(article_id, self._extract_price_from_row(row)))
+        metadata = {
+            "mode": mode_label,
+            "article_id": article_id,
+            "product_id": article_id,
+            "name": name,
+            "product_code": str(row.get("product_code", "")),
+            "product_name": row.get("prod_name", row.get("product_name", name)),
+            "product_type_name": row.get("product_type_name", ""),
+            "product_group_name": row.get("product_group_name", ""),
+            "graphical_appearance_name": row.get("graphical_appearance_name", ""),
+            "colour_group_name": row.get("colour_group_name", ""),
+            "perceived_colour_master_name": row.get("perceived_colour_master_name", ""),
+            "perceived_colour_value_name": row.get("perceived_colour_value_name", ""),
+            "index_name": row.get("index_name", ""),
+            "index_group_name": row.get("index_group_name", ""),
+            "department_name": row.get("department_name", ""),
+            "section_name": row.get("section_name", ""),
+            "garment_group_name": row.get("garment_group_name", ""),
+            "detail_desc": row.get("detail_desc", ""),
+            "category": row.get("category", ""),
+            "main_category": row.get("main_category", ""),
+            "category_l1": row.get("category_l1", ""),
+            "category_l2": row.get("category_l2", ""),
+            "category_l3": row.get("category_l3", ""),
+            "image_name": row.get("image_name", ""),
+            "image_path": str(image_path) if image_path is not None else "",
+            "price": price,
+        }
+        return SearchItem(
+            product_id=article_id,
+            name=name,
+            price=price,
+            description=description,
+            image=image,
+            image_path=str(image_path) if image_path is not None else None,
+            metadata=metadata,
+        )
+
+    def _load_dev_items(self) -> List[SearchItem]:
+        articles, articles_path = self._load_article_table("dev")
+
+        price_map = self._load_article_price_map()
+        shuffled = articles.sample(frac=1.0, random_state=self.random_seed).reset_index(drop=True)
+
+        items: List[SearchItem] = []
+        for _, row in shuffled.iterrows():
+            item = self._build_item_from_article_row(row, price_map=price_map, mode_label="dev")
+            if item is None:
+                continue
+            if item.image_path is None:
+                continue
+            items.append(item)
+            if len(items) >= self.dev_sample_size:
+                break
+
+        if not items:
+            raise RuntimeError(
+                "Dev mode could not find any image-backed items. "
+                "Set SEARCH_ENGINE_IMAGE_ROOT to a valid H&M image directory such as D:/imagedata."
+            )
+
+        LOGGER.info(
+            "Prepared %d dev items with real images from %s (seed=%d)",
+            len(items),
+            articles_path,
+            self.random_seed,
+        )
+        self._write_pair_manifest(items, mode_label="dev", source_articles_path=articles_path)
+        return items
+
     def _load_production_items(self) -> List[SearchItem]:
         # production 모드에서는 H&M articles.csv를 읽어 상품 메타데이터를 구성한다.
-        articles_path = self.data_root / "articles.csv"
-        if not articles_path.exists():
-            raise FileNotFoundError(f"articles.csv not found: {articles_path}")
-
-        articles = pd.read_csv(articles_path).fillna("")
+        articles, articles_path = self._load_article_table("production")
         price_map = self._load_article_price_map()
 
         items: List[SearchItem] = []
         for _, row in articles.iterrows():
-            article_id = self._article_id(row)
-            if not article_id:
-                continue
-            name = self._build_article_name(row)
-            description = self._build_article_description(row)
-            image = self._locate_article_image(row)
-            price = float(price_map.get(article_id, 0.0))
-            metadata = {
-                "mode": "production",
-                "article_id": article_id,
-                "product_code": str(row.get("product_code", "")),
-                "product_name": row.get("prod_name", row.get("product_name", name)),
-                "product_type_name": row.get("product_type_name", ""),
-                "graphical_appearance_name": row.get("graphical_appearance_name", ""),
-                "colour_group_name": row.get("colour_group_name", ""),
-                "perceived_colour_value_name": row.get("perceived_colour_value_name", ""),
-                "index_name": row.get("index_name", ""),
-                "department_name": row.get("department_name", ""),
-                "section_name": row.get("section_name", ""),
-                "garment_group_name": row.get("garment_group_name", ""),
-                "detail_desc": row.get("detail_desc", ""),
-                "image_name": row.get("image_name", ""),
-                "price": price,
-            }
-            items.append(
-                SearchItem(
-                    product_id=article_id,
-                    name=name,
-                    price=price,
-                    description=description,
-                    image=image,
-                    metadata=metadata,
-                )
-            )
+            item = self._build_item_from_article_row(row, price_map=price_map, mode_label="production")
+            if item is not None:
+                items.append(item)
         LOGGER.info("Prepared %d production items from %s", len(items), articles_path)
+        self._write_pair_manifest(items, mode_label="production", source_articles_path=articles_path)
         return items
 
     def _load_article_price_map(self) -> Dict[str, float]:
         candidates = [
+            self.data_root / "item_features_dev.csv",
+            self.data_root / "item_features.csv",
+            self.data_root / "item_master_dev.csv",
+            self.data_root / "item_master.csv",
             self.data_root / "transactions_train.csv",
             self.data_root / "processed" / "transactions_train.csv",
             self.data_root / "train_data.csv",
@@ -428,9 +814,14 @@ class MultimodalSearchEngine:
             if not path.exists():
                 continue
             try:
-                df = pd.read_csv(path, usecols=["article_id", "price"]).dropna()
-                df["article_id"] = df["article_id"].astype(str)
-                grouped = df.groupby("article_id")["price"].mean()
+                df = pd.read_csv(path, dtype={"article_id": str}).dropna()
+                if "article_id" not in df.columns:
+                    continue
+                price_col = next((name for name in ("price", "avg_price", "price_mean") if name in df.columns), None)
+                if price_col is None:
+                    continue
+                df["article_id"] = df["article_id"].apply(self._normalize_article_id)
+                grouped = pd.to_numeric(df[price_col], errors="coerce").groupby(df["article_id"]).mean()
                 return {str(key): float(value) for key, value in grouped.items()}
             except Exception as exc:
                 LOGGER.warning("Failed to load prices from %s: %s", path, exc)
@@ -438,10 +829,13 @@ class MultimodalSearchEngine:
 
     @staticmethod
     def _article_id(row: pd.Series) -> str:
-        for key in ("article_id", "product_code", "item_id"):
-            value = str(row.get(key, "")).strip()
+        for key in ("article_id", "item_id", "product_id"):
+            value = MultimodalSearchEngine._normalize_article_id(row.get(key, ""))
             if value:
                 return value
+        value = str(row.get("product_code", "")).strip()
+        if value:
+            return value
         return ""
 
     @staticmethod
@@ -450,6 +844,7 @@ class MultimodalSearchEngine:
             str(row.get("prod_name", "")).strip(),
             str(row.get("product_name", "")).strip(),
             str(row.get("product_type_name", "")).strip(),
+            str(row.get("category_l3", "")).strip(),
             str(row.get("detail_desc", "")).strip(),
         ]
         for value in candidates:
@@ -463,16 +858,69 @@ class MultimodalSearchEngine:
         fields = [
             str(row.get("prod_name", "")).strip(),
             str(row.get("product_type_name", "")).strip(),
+            str(row.get("product_group_name", "")).strip(),
             str(row.get("graphical_appearance_name", "")).strip(),
             str(row.get("colour_group_name", "")).strip(),
+            str(row.get("perceived_colour_master_name", "")).strip(),
             str(row.get("perceived_colour_value_name", "")).strip(),
             str(row.get("index_name", "")).strip(),
+            str(row.get("index_group_name", "")).strip(),
             str(row.get("department_name", "")).strip(),
             str(row.get("section_name", "")).strip(),
             str(row.get("garment_group_name", "")).strip(),
+            str(row.get("category", "")).strip(),
+            str(row.get("main_category", "")).strip(),
+            str(row.get("color", "")).strip(),
             str(row.get("detail_desc", "")).strip(),
         ]
         return " | ".join(field for field in fields if field)
+
+    @staticmethod
+    def _build_semantic_article_description(row: pd.Series) -> str:
+        name = str(row.get("prod_name", "")).strip()
+        product_type = str(row.get("product_type_name", "")).strip()
+        product_group = str(row.get("product_group_name", "")).strip()
+        color = str(row.get("colour_group_name", "")).strip() or str(row.get("perceived_colour_master_name", "")).strip()
+        department = str(row.get("department_name", "")).strip()
+        section = str(row.get("section_name", "")).strip()
+        garment = str(row.get("garment_group_name", "")).strip()
+        appearance = str(row.get("graphical_appearance_name", "")).strip()
+        detail_desc = str(row.get("detail_desc", "")).strip()
+        category_l1 = str(row.get("category_l1", "")).strip() or str(row.get("index_group_name", "")).strip()
+        category_l2 = str(row.get("category_l2", "")).strip() or section
+        category_l3 = str(row.get("category_l3", "")).strip() or product_type
+
+        sentences = [
+            f"{name}." if name else "",
+            f"Product type: {product_type}." if product_type else "",
+            f"Product group: {product_group}." if product_group else "",
+            f"Color: {color}." if color else "",
+            f"Department: {department}." if department else "",
+            f"Section: {section}." if section else "",
+            f"Garment group: {garment}." if garment else "",
+            f"Appearance: {appearance}." if appearance else "",
+            f"Description: {detail_desc}." if detail_desc else "",
+        ]
+        keywords = " ".join(
+            value
+            for value in [
+                name,
+                product_type,
+                product_group,
+                color,
+                department,
+                section,
+                garment,
+                category_l1,
+                category_l2,
+                category_l3,
+                appearance,
+            ]
+            if value
+        )
+        if keywords:
+            sentences.append(f"Keywords: {keywords}.")
+        return " ".join(part for part in sentences if part)
 
     def _locate_article_image(self, row: pd.Series) -> Optional[Image.Image]:
         # 이미지가 있으면 텍스트와 함께 상품 임베딩에 반영하고, 없으면 텍스트만 사용한다.
@@ -510,30 +958,258 @@ class MultimodalSearchEngine:
                     return image
         return None
 
+    def _candidate_image_roots(self) -> List[Path]:
+        env_roots: List[Path] = []
+        env_value = (
+            os.getenv("SEARCH_ENGINE_IMAGE_ROOTS")
+            or os.getenv("SEARCH_ENGINE_IMAGE_ROOT")
+            or os.getenv("IMAGE_ROOT")
+            or ""
+        ).strip()
+        if env_value:
+            for raw_path in env_value.replace("\n", ";").split(";"):
+                cleaned = raw_path.strip()
+                if cleaned:
+                    env_roots.append(Path(cleaned))
+
+        roots = env_roots + [
+            Path("D:/imagedata"),
+            self.data_root / "images",
+            self.data_root,
+            self.data_root.parent / "images",
+            self.data_root.parent / "raw" / "images",
+        ]
+        available: List[Path] = []
+        for root in roots:
+            try:
+                if root.exists():
+                    available.append(root)
+            except OSError:
+                continue
+        return available
+
+    def _locate_article_image_path(self, row: pd.Series) -> Optional[Path]:
+        image_name = str(row.get("image_name", "")).strip()
+        article_id = self._article_id(row)
+        candidates: List[Path] = []
+        image_roots = self._candidate_image_roots()
+
+        if image_name:
+            image_path = Path(image_name)
+            for root in image_roots:
+                candidates.append(root / image_path)
+            candidates.append(self.data_root / image_path)
+
+        if article_id:
+            normalized_article_id = article_id
+            try:
+                normalized_article_id = f"{int(float(article_id)):010d}"
+            except Exception:
+                pass
+
+            folder_prefixes = {
+                "",
+                normalized_article_id[:2],
+                normalized_article_id[:3],
+            }
+            filename_variants = [normalized_article_id, article_id]
+            for root in image_roots:
+                for filename in filename_variants:
+                    for folder in folder_prefixes:
+                        base = root / folder if folder else root
+                        candidates.append(base / f"{filename}.jpg")
+                        candidates.append(base / f"{filename}.jpeg")
+                        candidates.append(base / f"{filename}.png")
+                        candidates.append(base / filename)
+
+        for path in candidates:
+            try:
+                if path.exists():
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _read_item_image_bytes(self, item: SearchItem) -> Optional[bytes]:
+        image_base64 = str(item.metadata.get("_image_base64", "")).strip()
+        if image_base64:
+            try:
+                return base64.b64decode(image_base64)
+            except Exception:
+                return None
+        if item.image_path:
+            try:
+                return Path(item.image_path).read_bytes()
+            except OSError:
+                return None
+        if item.image is not None:
+            buffer = io.BytesIO()
+            item.image.save(buffer, format="PNG")
+            return buffer.getvalue()
+        return None
+
+    def _metadata_hint_text(self, item: SearchItem) -> str:
+        metadata = dict(item.metadata or {})
+        tokens: List[str] = []
+        for value in (
+            metadata.get("colour_group_name", ""),
+            metadata.get("perceived_colour_master_name", ""),
+            metadata.get("product_type_name", ""),
+            metadata.get("garment_group_name", ""),
+            metadata.get("section_name", ""),
+            metadata.get("department_name", ""),
+            metadata.get("product_group_name", ""),
+        ):
+            token = str(value or "").strip().lower()
+            if token and token not in tokens:
+                tokens.append(token)
+        if not tokens:
+            fallback = (item.name or item.description or "").strip().lower()
+            return self._expand_query_terms(fallback)
+        return self._expand_query_terms(" ".join(tokens))
+
+    def _weighted_combine_vectors(
+        self,
+        vectors: Sequence[Optional[np.ndarray]],
+        weights: Sequence[float],
+    ) -> np.ndarray:
+        usable: List[np.ndarray] = []
+        usable_weights: List[float] = []
+        for vector, weight in zip(vectors, weights):
+            if vector is None or weight <= 0:
+                continue
+            array = np.asarray(vector, dtype=np.float32)
+            if array.size == 0 or not np.any(array):
+                continue
+            usable.append(array)
+            usable_weights.append(float(weight))
+        if not usable:
+            return np.zeros(self.dimension, dtype=np.float32)
+        combined = np.average(
+            np.stack(usable).astype(np.float32),
+            axis=0,
+            weights=np.asarray(usable_weights, dtype=np.float32),
+        )
+        return self.embedder._normalize(combined)
+
+    def _build_inner_product_index(self, vectors: np.ndarray) -> Any:
+        if faiss is not None:
+            index = faiss.IndexHNSWFlat(int(vectors.shape[1]), 32, faiss.METRIC_INNER_PRODUCT)
+            index.hnsw.efConstruction = 200
+            index.hnsw.efSearch = 64
+            index.add(vectors)
+            return index
+        index = _NumpyInnerProductIndex(int(vectors.shape[1]))
+        index.add(vectors)
+        return index
+
+    def _score_matrix(self, matrix: Optional[np.ndarray], query_vec: np.ndarray) -> np.ndarray:
+        if matrix is None or matrix.size == 0:
+            return np.zeros(len(self.items), dtype=np.float32)
+        vector = self.embedder._normalize(np.asarray(query_vec, dtype=np.float32))
+        return (matrix @ vector).astype(np.float32)
+
+    def _rank_results_from_scores(self, scores: np.ndarray, top_k: int) -> List[SearchResult]:
+        if scores.size == 0:
+            return []
+        order = np.argsort(-scores)[: max(1, int(top_k))]
+        hits: List[SearchResult] = []
+        for idx in order:
+            if idx < 0 or idx >= len(self.items):
+                continue
+            item = self.items[int(idx)]
+            hits.append(
+                SearchResult(
+                    item_id=str(item.product_id),
+                    score=float(scores[int(idx)]),
+                    metadata=dict(item.metadata or {}),
+                )
+            )
+        return hits
+
+    def _resolve_image_query_anchor(self, image_vec: np.ndarray, image_bytes: Optional[bytes]) -> Tuple[Optional[int], np.ndarray, bool]:
+        image_scores = self._score_matrix(self._image_embeddings, image_vec)
+        if image_bytes:
+            cache_key = self.embedder._hash_image_bytes(image_bytes)
+            anchor_idx = self._image_hash_to_item_index.get(cache_key)
+            if anchor_idx is not None:
+                return int(anchor_idx), image_scores, True
+        if image_scores.size == 0 or not np.any(image_scores):
+            return None, image_scores, False
+        return int(np.argmax(image_scores)), image_scores, False
+
+    def _search_image_mode(self, image_vec: np.ndarray, image_bytes: Optional[bytes], top_k: int) -> List[SearchResult]:
+        anchor_idx, image_scores, exact_match = self._resolve_image_query_anchor(image_vec, image_bytes)
+        if anchor_idx is None:
+            fallback_scores = 0.75 * image_scores + 0.25 * self._score_matrix(self._embeddings, image_vec)
+            return self._rank_results_from_scores(fallback_scores.astype(np.float32), top_k)
+
+        hint_vec = self.embedder.embed_text(self._metadata_hint_text(self.items[anchor_idx]))
+        if exact_match:
+            combined_vec = self._weighted_combine_vectors([image_vec, hint_vec], [0.25, 0.75])
+            image_weight, mm_weight, text_weight = 0.10, 0.20, 0.70
+        else:
+            combined_vec = self._weighted_combine_vectors([image_vec, hint_vec], [0.45, 0.55])
+            image_weight, mm_weight, text_weight = 0.35, 0.20, 0.45
+
+        multimodal_scores = self._score_matrix(self._embeddings, combined_vec)
+        text_scores = self._score_matrix(self._text_embeddings, hint_vec)
+        final_scores = (
+            image_weight * image_scores
+            + mm_weight * multimodal_scores
+            + text_weight * text_scores
+        ).astype(np.float32)
+        return self._rank_results_from_scores(final_scores, top_k)
+
     def _build_index(self) -> None:
         # 엔진 내부 데이터셋으로부터 상품별 CLIP 임베딩을 생성해 기본 인덱스를 만든다.
         vectors: List[np.ndarray] = []
+        text_vectors: List[np.ndarray] = []
+        image_vectors: List[np.ndarray] = []
+        self._image_hash_to_item_index = {}
         for item in self.items:
-            vectors.append(self.embedder.embed_item(text=item.description or item.name, image=item.image))
+            text_value = item.description or item.name
+            text_vector = self.embedder.embed_text(text_value) if text_value else np.zeros(self.dimension, dtype=np.float32)
+            text_vectors.append(text_vector)
+            image_vector = None
+            if item.image is not None:
+                image_vector = self.embedder.embed_image(item.image)
+                if item.image_path:
+                    self.embedder.register_image_file_embedding(item.image_path, image_vector)
+                item.metadata["_image_embedding"] = image_vector.astype(np.float32).tolist()
+                image_bytes = self._read_item_image_bytes(item)
+                if image_bytes:
+                    item.metadata["_image_base64"] = base64.b64encode(image_bytes).decode("utf-8")
+                    self.embedder.register_image_bytes_embedding(image_bytes, image_vector)
+                    self._image_hash_to_item_index[self.embedder._hash_image_bytes(image_bytes)] = len(image_vectors)
+            image_vectors.append(
+                image_vector if image_vector is not None else np.zeros(self.dimension, dtype=np.float32)
+            )
+            vectors.append(self.embedder.combine_embeddings([text_vector, image_vector]))
 
         if not vectors:
             raise ValueError("No items available to index")
 
         self._embeddings = np.vstack(vectors).astype(np.float32)
+        self._text_embeddings = np.vstack(text_vectors).astype(np.float32)
+        self._image_embeddings = np.vstack(image_vectors).astype(np.float32)
         self._normalize_matrix_inplace(self._embeddings)
+        self._normalize_matrix_inplace(self._text_embeddings)
+        self._normalize_matrix_inplace(self._image_embeddings)
         self.dimension = int(self._embeddings.shape[1])
         self.item_ids = [str(item.product_id) for item in self.items]
+        self._image_item_indices = np.arange(len(self.items), dtype=np.int64)
 
         if faiss is not None:
             # Inner Product + L2 normalize 조합이라 cosine similarity 검색처럼 동작한다.
-            self.index = faiss.IndexHNSWFlat(self.dimension, 32, faiss.METRIC_INNER_PRODUCT)
-            self.index.hnsw.efConstruction = 200
-            self.index.hnsw.efSearch = 64
-            self.index.add(self._embeddings)
+            self.index = self._build_inner_product_index(self._embeddings)
+            self.text_index = self._build_inner_product_index(self._text_embeddings)
+            self.image_index = self._build_inner_product_index(self._image_embeddings)
             LOGGER.info("Built FAISS HNSW index with %d items", len(self.items))
         else:
-            self.index = _NumpyInnerProductIndex(self.dimension)
-            self.index.add(self._embeddings)
+            self.index = self._build_inner_product_index(self._embeddings)
+            self.text_index = self._build_inner_product_index(self._text_embeddings)
+            self.image_index = self._build_inner_product_index(self._image_embeddings)
             LOGGER.warning("FAISS unavailable, using NumPy fallback index with %d items", len(self.items))
         self._is_built = True
 
@@ -562,6 +1238,8 @@ class MultimodalSearchEngine:
 
         self._embeddings = np.vstack(normalized_rows).astype(np.float32)
         self._normalize_matrix_inplace(self._embeddings)
+        self._text_embeddings = self._embeddings.copy()
+        self._image_embeddings = self._embeddings.copy()
         self.dimension = int(self._embeddings.shape[1])
 
         self.items = []
@@ -579,19 +1257,17 @@ class MultimodalSearchEngine:
                     price=price,
                     description=description,
                     image=None,
+                    image_path=str(payload.get("image_path", "")) or None,
                     metadata=payload,
                 )
             )
             self.item_ids.append(str(item_id))
 
-        if faiss is not None:
-            self.index = faiss.IndexHNSWFlat(self.dimension, 32, faiss.METRIC_INNER_PRODUCT)
-            self.index.hnsw.efConstruction = 200
-            self.index.hnsw.efSearch = 64
-            self.index.add(self._embeddings)
-        else:
-            self.index = _NumpyInnerProductIndex(self.dimension)
-            self.index.add(self._embeddings)
+        self._image_item_indices = np.arange(len(self.items), dtype=np.int64)
+        self._image_hash_to_item_index = {}
+        self.index = self._build_inner_product_index(self._embeddings)
+        self.text_index = self._build_inner_product_index(self._text_embeddings)
+        self.image_index = self._build_inner_product_index(self._image_embeddings)
         self._is_built = True
         LOGGER.info("Built compatibility index with %d items", len(self.items))
 
@@ -639,7 +1315,9 @@ class MultimodalSearchEngine:
         self,
         query: Optional[str] = None,
         image: Optional[Image.Image] = None,
+        image_bytes: Optional[bytes] = None,
         top_k: Optional[int] = None,
+        use_cache: bool = True,
         query_type: Optional[str] = None,
         embedding: Optional[np.ndarray] = None,
         text_embedding: Optional[np.ndarray] = None,
@@ -671,7 +1349,14 @@ class MultimodalSearchEngine:
             raise RuntimeError("Search index is not initialized")
 
         top_k = max(1, int(top_k or self.top_k_default))
-        query_vec, search_type = self.embedder.embed_query(text=query, image=image)
+        started = time.perf_counter()
+        prepared_query = self._expand_query_terms(query or "")
+        query_vec, search_type = self.embedder.embed_query(
+            text=prepared_query,
+            image=image,
+            image_bytes=image_bytes,
+            use_cache=use_cache,
+        )
         if not np.any(query_vec):
             return {
                 "search_type": search_type,
@@ -680,8 +1365,10 @@ class MultimodalSearchEngine:
                 "total_count": 0,
             }
 
-        started = time.perf_counter()
-        vector_results = self._search_from_vector(query_vec, top_k)
+        if search_type == "image":
+            vector_results = self._search_image_mode(query_vec, image_bytes=image_bytes, top_k=top_k)
+        else:
+            vector_results = self._search_from_vector(query_vec, top_k)
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         results: List[Dict[str, Any]] = []
@@ -691,8 +1378,8 @@ class MultimodalSearchEngine:
                 {
                     "product_id": str(meta.get("product_id", hit.item_id)),
                     "name": str(meta.get("name", "")),
-                    "score": float(hit.score),
-                    "price": float(meta.get("price", 0.0)),
+                    "score": round(float(hit.score), 10),
+                    "price": round(float(meta.get("price", 0.0)), 10),
                 }
             )
 
@@ -714,15 +1401,27 @@ class MultimodalSearchEngine:
         else:
             np.savez_compressed(index_path + ".npz", vectors=getattr(self.index, "vectors", None))
 
+        aux_path = Path(metadata_path).with_suffix(Path(metadata_path).suffix + ".aux.npz")
+        np.savez_compressed(
+            aux_path,
+            multimodal_embeddings=self._embeddings,
+            text_embeddings=self._text_embeddings,
+            image_embeddings=self._image_embeddings,
+        )
+
         payload = {
             "mode": self.mode,
             "dimension": self.dimension,
+            "index_format": "clip_multimodal_v3",
+            "aux_vectors_file": aux_path.name,
             "items": [
                 {
                     "product_id": item.product_id,
                     "name": item.name,
                     "price": item.price,
                     "description": item.description,
+                    "image_path": item.image_path,
+                    "image_base64": self._serialize_item_image(item),
                     "metadata": item.metadata,
                 }
                 for item in self.items
@@ -730,20 +1429,43 @@ class MultimodalSearchEngine:
         }
         Path(metadata_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
+    @staticmethod
+    def _serialize_item_image(item: SearchItem) -> str | None:
+        if item.image_path:
+            image_path = Path(item.image_path)
+            if image_path.exists():
+                try:
+                    return base64.b64encode(image_path.read_bytes()).decode("utf-8")
+                except OSError:
+                    pass
+        if item.image is not None:
+            buffer = io.BytesIO()
+            item.image.save(buffer, format="PNG")
+            return base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return None
+
     @classmethod
     def load_from_artifacts(
         cls,
         index_path: str,
         metadata_path: str,
         mode: str = "production",
+        data_root: Optional[str] = None,
         clip_model_name: str = CLIP_MODEL_NAME,
     ) -> "MultimodalSearchEngine":
         obj = cls.__new__(cls)
         obj.mode = mode
-        obj.data_root = cls._resolve_data_root(None)
+        obj.data_root = cls._resolve_runtime_data_root(data_root)
         obj.top_k_default = DEFAULT_TOP_K
         obj.embedder = OpenAIClipEmbedder(model_name=clip_model_name)
         obj.dimension = int(obj.embedder.dim or 512)
+        obj.text_index = None
+        obj.image_index = None
+        obj._text_embeddings = None
+        obj._image_embeddings = None
+        obj._image_item_indices = np.empty((0,), dtype=np.int64)
+        obj._image_hash_to_item_index = {}
+        obj._aux_vectors_path = None
         if faiss is not None:
             obj.index = faiss.read_index(index_path)
         else:
@@ -752,21 +1474,90 @@ class MultimodalSearchEngine:
             obj.index.add(data["vectors"])
 
         meta = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
-        obj.items = [
-            SearchItem(
+        obj.items = []
+        for item in meta.get("items", []):
+            item_metadata = dict(item.get("metadata", {}))
+            image_base64 = str(item.get("image_base64", "")).strip()
+            if image_base64:
+                item_metadata["_image_base64"] = image_base64
+            search_item = SearchItem(
                 product_id=str(item.get("product_id", "")),
                 name=str(item.get("name", "")),
                 price=float(item.get("price", 0.0)),
                 description=str(item.get("description", "")),
+                # Keep cached image bytes in metadata and avoid eagerly materializing
+                # every PIL image during startup. This keeps dev/prod artifact loads
+                # lighter and prevents unnecessary memory spikes.
                 image=None,
-                metadata=dict(item.get("metadata", {})),
+                image_path=str(item.get("image_path", "")) or None,
+                metadata=item_metadata,
             )
-            for item in meta.get("items", [])
-        ]
-        obj._embeddings = None
+            obj.items.append(search_item)
+        aux_file = str(meta.get("aux_vectors_file", "")).strip()
+        aux_path = Path(metadata_path).with_name(aux_file) if aux_file else Path(metadata_path).with_suffix(Path(metadata_path).suffix + ".aux.npz")
+        if aux_path.exists():
+            try:
+                aux = np.load(aux_path)
+                obj._embeddings = np.asarray(aux["multimodal_embeddings"], dtype=np.float32)
+                obj._text_embeddings = np.asarray(aux["text_embeddings"], dtype=np.float32)
+                obj._image_embeddings = np.asarray(aux["image_embeddings"], dtype=np.float32)
+                obj.text_index = obj._build_inner_product_index(obj._text_embeddings)
+                obj.image_index = obj._build_inner_product_index(obj._image_embeddings)
+                obj._image_item_indices = np.arange(len(obj.items), dtype=np.int64)
+                obj._aux_vectors_path = aux_path
+            except Exception:
+                obj._embeddings = None
+                obj._text_embeddings = None
+                obj._image_embeddings = None
+        else:
+            obj._embeddings = None
         obj._is_built = True
         obj.item_ids = [str(item.product_id) for item in obj.items]
+        for idx, item in enumerate(obj.items):
+            embedding_values = item.metadata.get("_image_embedding")
+            image_base64 = str(item.metadata.get("_image_base64", "")).strip()
+            if not embedding_values or not image_base64:
+                continue
+            try:
+                embedding = np.asarray(embedding_values, dtype=np.float32)
+                image_bytes = base64.b64decode(image_base64)
+                obj.embedder.register_image_bytes_embedding(image_bytes, embedding)
+                obj._image_hash_to_item_index[obj.embedder._hash_image_bytes(image_bytes)] = idx
+            except Exception:
+                continue
+        if obj._text_embeddings is None or obj._image_embeddings is None:
+            text_vectors: List[np.ndarray] = []
+            image_vectors: List[np.ndarray] = []
+            multimodal_vectors: List[np.ndarray] = []
+            for item in obj.items:
+                text_vector = obj.embedder.embed_text(item.description or item.name)
+                image_values = item.metadata.get("_image_embedding")
+                image_vector = (
+                    np.asarray(image_values, dtype=np.float32)
+                    if image_values is not None
+                    else np.zeros(obj.dimension, dtype=np.float32)
+                )
+                image_vector = obj.embedder._normalize(image_vector)
+                text_vectors.append(text_vector)
+                image_vectors.append(image_vector)
+                multimodal_vectors.append(obj.embedder.combine_embeddings([text_vector, image_vector]))
+            obj._text_embeddings = np.vstack(text_vectors).astype(np.float32)
+            obj._image_embeddings = np.vstack(image_vectors).astype(np.float32)
+            obj._embeddings = np.vstack(multimodal_vectors).astype(np.float32)
+            obj._normalize_matrix_inplace(obj._text_embeddings)
+            obj._normalize_matrix_inplace(obj._image_embeddings)
+            obj._normalize_matrix_inplace(obj._embeddings)
+            obj.text_index = obj._build_inner_product_index(obj._text_embeddings)
+            obj.image_index = obj._build_inner_product_index(obj._image_embeddings)
+            obj._image_item_indices = np.arange(len(obj.items), dtype=np.int64)
         return obj
+
+    def find_item(self, product_id: str) -> Optional[SearchItem]:
+        needle = normalize_article_id(product_id)
+        for item in self.items:
+            if normalize_article_id(item.product_id) == needle:
+                return item
+        return None
 
 def _configure_logging() -> None:
     if logging.getLogger().handlers:
