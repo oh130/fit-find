@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   BudgetSetBundle,
   OnboardingPersonaScores,
@@ -177,11 +177,11 @@ function App() {
 
   const [onboardingDescription, setOnboardingDescription] = useState("");
   const [selectedStyles, setSelectedStyles] = useState<string[]>(["minimal"]);
-  const [budgetRange, setBudgetRange] = useState("mid");
   const [personaScores, setPersonaScores] = useState<OnboardingPersonaScores>({});
   const [isAnalyzingOnboarding, setIsAnalyzingOnboarding] = useState(false);
   const [isSubmittingPersona, setIsSubmittingPersona] = useState(false);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const isManagingHistoryRef = useRef(false);
 
   const popularityWeight = 100 - recommendationWeight;
   const personalizationPriorityWeight = recommendationWeight / 50;
@@ -201,7 +201,7 @@ function App() {
   useEffect(() => {
     setPersonaScores({});
     setOnboardingError(null);
-  }, [onboardingDescription, selectedStyles, budgetRange]);
+  }, [onboardingDescription, selectedStyles]);
 
   useEffect(() => {
     if (!isRegistered || showOnboarding) {
@@ -256,6 +256,38 @@ function App() {
     personalizationPriorityWeight,
     popularityPriorityWeight,
   ]);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const nextView = event.state?.view;
+
+      if (showOnboarding && nextView !== "onboarding") {
+        isManagingHistoryRef.current = true;
+        setShowOnboarding(false);
+        isManagingHistoryRef.current = false;
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [showOnboarding]);
+
+  useEffect(() => {
+    if (!isRegistered || isManagingHistoryRef.current) {
+      return;
+    }
+
+    const currentView = window.history.state?.view;
+
+    if (showOnboarding && currentView !== "onboarding") {
+      window.history.pushState({ view: "onboarding" }, "");
+      return;
+    }
+
+    if (!showOnboarding && currentView === "onboarding") {
+      window.history.replaceState({ view: "main" }, "");
+    }
+  }, [isRegistered, showOnboarding]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -375,7 +407,7 @@ function App() {
         userId: userId.trim(),
         description: onboardingDescription.trim(),
         styleChoices: selectedStyles,
-        budgetRange,
+        budgetRange: null,
       });
 
       setPersonaScores(scores);
@@ -466,18 +498,18 @@ function App() {
 
   const modeLabel =
     searchMode === "multimodal" ? "멀티모달" : searchMode === "image" ? "이미지" : "텍스트";
-  const selectedPersonaLabel =
-    personaOptions.find((persona) => persona.key === selectedOnboardingPersona)?.name ??
-    selectedOnboardingPersona;
+  const selectedPersona =
+    personaOptions.find((persona) => persona.key === selectedOnboardingPersona) ?? null;
+  const selectedPersonaLabel = selectedPersona?.name ?? selectedOnboardingPersona;
   const activeSearchResults = searchResultView === "personalized" ? personalizedResults : results;
   const activeSearchLatency = searchResultView === "personalized" ? personalizedLatency : activeLatency;
   const activeSearchScoreLabel = searchResultView === "personalized" ? "추천 점수" : "유사도";
   const searchEmptyMessage = !hasSearched
-    ? "검색을 실행하면 유사도순 결과와 내 취향순 재정렬 결과가 여기에 표시됩니다."
+    ? "검색을 실행하면 유사도순 결과와 내 취향순 결과가 여기에 표시됩니다."
     : searchError
       ? searchError
       : searchResultView === "personalized"
-        ? "검색 후보 안에서 개인화 재정렬할 결과가 아직 없습니다. 검색을 다시 실행해 주세요."
+        ? "검색 후보 안에서 개인화된 결과가 아직 없습니다. 검색을 다시 시도해 주세요."
         : "검색 결과가 없습니다. 검색어를 조금 더 구체적으로 바꿔 보세요.";
 
   if (showOnboarding) {
@@ -485,11 +517,11 @@ function App() {
       <div className="app-shell onboarding-shell">
         <section className="onboarding-panel">
           <div className="onboarding-copy">
-            <p className="eyebrow">Cold Start Onboarding</p>
-            <h1>처음 방문하셨군요. 먼저 취향을 알려주세요.</h1>
+            <p className="eyebrow">Personalization Setup</p>
+            <h1>먼저 취향을 알려주시면 추천을 바로 맞춰드립니다.</h1>
             <p>
-              자유 입력과 스타일 선택을 바탕으로 페르소나를 추정한 뒤, 원하는 페르소나를 확정하면
-              바로 추천에 반영됩니다.
+              취향 설명과 스타일 선택을 바탕으로 페르소나를 분석하고, 결과를 확정하면
+              개인화 추천에 즉시 반영됩니다.
             </p>
           </div>
 
@@ -518,53 +550,38 @@ function App() {
             </div>
 
             <div className="recommendation-toolbar">
-              <label className="user-id-field">
-                <span>예산 범위</span>
-                <select value={budgetRange} onChange={(event) => setBudgetRange(event.target.value)}>
-                  <option value="low">Low</option>
-                  <option value="mid">Mid</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
               <button
                 type="button"
                 className="primary-button"
                 onClick={runOnboardingAnalysis}
                 disabled={isAnalyzingOnboarding}
               >
-                {isAnalyzingOnboarding ? "분석 중..." : "페르소나 분석"}
+                {isAnalyzingOnboarding ? "분석 중..." : "취향 분석하기"}
               </button>
             </div>
           </div>
 
-          <div className="persona-grid">
-            {personaOptions.map((persona) => (
-              <button
-                key={persona.key}
-                type="button"
-                className={
-                  selectedOnboardingPersona === persona.key ? "persona-option active" : "persona-option"
-                }
-                onClick={() => setSelectedOnboardingPersona(persona.key)}
-              >
-                <p className="persona-name">{persona.name}</p>
-                <h2>{persona.title}</h2>
-                <p className="persona-summary">{persona.summary}</p>
-                <strong>{personaScores[persona.key] ?? 0}%</strong>
+          {selectedPersona && Object.keys(personaScores).length > 0 ? (
+            <div className="persona-grid">
+              <article className="persona-option active">
+                <p className="persona-name">{selectedPersona.name}</p>
+                <h2>{selectedPersona.title}</h2>
+                <p className="persona-summary">{selectedPersona.summary}</p>
+                <strong>{personaScores[selectedPersona.key] ?? 0}%</strong>
                 <div className="persona-traits">
-                  {persona.traits.map((trait) => (
+                  {selectedPersona.traits.map((trait) => (
                     <span key={trait} className="badge">
                       {trait}
                     </span>
                   ))}
                 </div>
-              </button>
-            ))}
-          </div>
+              </article>
+            </div>
+          ) : null}
 
           <div className="onboarding-footer">
             <div className="persona-card">
-              <span>선택한 페르소나</span>
+              <span>현재 선택된 페르소나</span>
               <strong>{selectedPersonaLabel}</strong>
             </div>
             <button
@@ -573,7 +590,7 @@ function App() {
               onClick={startWithPersona}
               disabled={isSubmittingPersona || Object.keys(personaScores).length === 0}
             >
-              {isSubmittingPersona ? "저장 중..." : "이 페르소나로 시작하기"}
+              {isSubmittingPersona ? "저장 중..." : "이 취향으로 추천 받기"}
             </button>
           </div>
           {onboardingError ? <p className="status-text">{onboardingError}</p> : null}
@@ -587,18 +604,18 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">ModeMosaic</p>
-          <h1>검색부터 개인화 추천까지 이어지는 패션 탐색 화면</h1>
+          <h1>Multimodal Search</h1>
         </div>
         <div className="topbar-meta">
           <span>검색 모드: {modeLabel}</span>
           <span>최근 검색: {lastSearchedAt}</span>
-          <span>추천 대상: {userId}</span>
-          <span>회원 상태: {isRegistered ? "가입 완료" : "미가입"}</span>
-          <span>온보딩 페르소나: {selectedPersonaLabel}</span>
-          <span>추론 페르소나: {activeBundle.persona}</span>
-          <span>추천 Top-N: {topN}</span>
+          <span>사용자 ID: {userId}</span>
+          <span>개인화 상태: {isRegistered ? "설정 완료" : "설정 전"}</span>
+          <span>선택한 취향: {selectedPersonaLabel}</span>
+          <span>현재 추천 성향: {activeBundle.persona}</span>
+          <span>추천 개수: Top {topN}</span>
           <span>
-            개인화 {recommendationWeight} / 인기 {popularityWeight}
+            개인화 {recommendationWeight} / 대중성 {popularityWeight}
           </span>
           <span>예산: {budgetLabel}</span>
         </div>
@@ -608,8 +625,8 @@ function App() {
         <section className="panel signup-panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Registration</p>
-              <h3>먼저 user_id로 회원가입을 진행해 주세요</h3>
+              <p className="eyebrow">User Setup</p>
+              <h3>사용자 정보 설정</h3>
             </div>
           </div>
           <div className="signup-row">
@@ -628,21 +645,21 @@ function App() {
               onClick={handleSignUp}
               disabled={!userId.trim() || isRegistered}
             >
-              {isRegistered ? "회원가입 완료" : "회원가입"}
+              {isRegistered ? "설정 완료" : "설정 시작"}
             </button>
           </div>
           <p className="status-text signup-text">
-            회원가입 후 온보딩에서 취향을 분석하고, 그 결과를 초기 추천에 바로 반영합니다.
+            사용자 정보를 설정한 뒤 취향 분석을 진행하면 초기 추천에 바로 반영됩니다.
           </p>
         </section>
 
         <section className="hero-panel">
           <div className="hero-copy">
-            <p className="eyebrow">Search Console</p>
-            <h2>검색 시작점에서 바로 멀티모달 탐색이 가능한 화면</h2>
+            <p className="eyebrow">Search Experience</p>
+            <h2>검색 화면</h2>
             <p className="hero-description">
-              텍스트 질의와 이미지 업로드를 함께 받아 검색 타입을 자동으로 판단하고, 결과 카드에는
-              유사도와 응답 시간을 함께 보여줍니다.
+              검색어와 이미지를 함께 입력하면 상황에 맞는 검색 방식을 자동으로 적용하고,
+              결과 카드에는 유사도와 응답 시간을 함께 보여줍니다.
             </p>
 
             <div className="suggestion-row">
@@ -739,7 +756,7 @@ function App() {
           <div className="section-heading">
             <div>
               <p className="eyebrow">Search Results</p>
-              <h3>검색 결과 리스트</h3>
+              <h3>검색 결과</h3>
             </div>
             <div className="heading-metrics">
               <span className="metric">응답 시간 {activeSearchLatency}</span>
@@ -800,9 +817,9 @@ function App() {
         <section className="panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Home Recommendations</p>
+              <p className="eyebrow">Personalized Recommendations</p>
               <h3>
-                {userId} · {activeBundle.persona} 홈 추천
+                {userId} 사용자에게 맞춘 추천 결과
               </h3>
             </div>
             <div className="heading-metrics">
@@ -824,15 +841,15 @@ function App() {
                 />
               </label>
               <div className="persona-card">
-                <span>Onboarding Persona</span>
+                <span>선택한 페르소나</span>
                 <strong>{selectedPersonaLabel}</strong>
               </div>
               <div className="persona-card">
-                <span>Detected Persona</span>
+                <span>추천에 반영된 성향</span>
                 <strong>{activeBundle.persona}</strong>
               </div>
               <label className="user-id-field budget-field">
-                <span>Budget</span>
+                <span>예산</span>
                 <input
                   type="number"
                   min="0"
@@ -863,7 +880,7 @@ function App() {
                 onClick={refreshRecommendations}
                 disabled={isRefreshingRecommendations || !isRegistered}
               >
-                {isRefreshingRecommendations ? "새로고침 중..." : "새로고침"}
+                {isRefreshingRecommendations ? "불러오는 중..." : "추천 다시 보기"}
               </button>
               <button
                 type="button"
@@ -879,21 +896,23 @@ function App() {
                 onClick={loadBudgetSets}
                 disabled={isLoadingBudgetSets || !isRegistered}
               >
-                {isLoadingBudgetSets ? "세트 구성 중..." : "예산 세트 추천"}
+                {isLoadingBudgetSets ? "세트 구성 중..." : "예산 안에서 세트 보기"}
               </button>
             </div>
           </div>
 
           <div className="weight-panel">
             <div className="weight-copy">
-              <p className="eyebrow">Ranking Control</p>
-              <h4>개인화와 인기 기준 조절</h4>
-              <p>슬라이더는 개인화 모델 점수와 인기 점수의 최종 혼합 비율을 바꿉니다.</p>
+              <p className="eyebrow">Recommendation Control</p>
+              <h4>개인화와 대중성의 비중을 조절합니다</h4>
+              <p>
+                슬라이더를 움직이면 추천 결과에서 취향 반영 강도와 대중성을 함께 조절할 수 있습니다.
+              </p>
             </div>
             <div className="weight-control">
               <div className="weight-labels">
                 <span>개인화 {recommendationWeight}%</span>
-                <span>인기 {popularityWeight}%</span>
+                <span>대중성 {popularityWeight}%</span>
               </div>
               <input
                 type="range"
@@ -901,17 +920,17 @@ function App() {
                 max="100"
                 value={recommendationWeight}
                 onChange={(event) => setRecommendationWeight(Number(event.target.value))}
-                aria-label="개인화와 인기 기준 가중치 조절"
+                aria-label="개인화와 대중성 비중 조절"
               />
             </div>
           </div>
 
           {!isRegistered ? (
-            <p className="status-text">회원가입과 온보딩을 마치면 추천 결과를 불러옵니다.</p>
+            <p className="status-text">사용자 설정과 취향 분석을 마치면 추천 결과가 여기에 표시됩니다.</p>
           ) : null}
           {recommendationError ? <p className="status-text">{recommendationError}</p> : null}
           {isRefreshingRecommendations ? (
-            <p className="status-text">추천 API에서 최신 결과를 불러오는 중입니다.</p>
+            <p className="status-text">최신 추천 결과를 불러오는 중입니다.</p>
           ) : null}
           {isGeneratingReasons ? (
             <p className="status-text">AI가 현재 추천 리스트의 이유를 생성하는 중입니다.</p>
@@ -943,7 +962,10 @@ function App() {
                     <strong>{item.price}</strong>
                   </div>
                   <h4>{item.title}</h4>
-                  <p>{item.reason}</p>
+                  <div className="reason-callout">
+                    <span className="reason-label">추천 이유</span>
+                    <p>{item.reason}</p>
+                  </div>
                   <div className="result-stats">
                     <span className="badge">추천 점수 {(item.score * 100).toFixed(1)}%</span>
                     <span className="badge">{userId}</span>
@@ -958,7 +980,7 @@ function App() {
           <div className="section-heading" style={{ marginTop: 24 }}>
             <div>
               <p className="eyebrow">Budget Set</p>
-              <h3>예산 기반 세트 추천</h3>
+              <h3>예산 안에서 구성한 추천 세트</h3>
             </div>
             <div className="heading-metrics">
               <span className="metric">예산 {budgetLabel}</span>
@@ -967,7 +989,7 @@ function App() {
           </div>
 
           {budgetSets.sets.length === 0 ? (
-            <p className="status-text">예산 세트 추천 버튼을 누르면 세트 조합 결과가 여기에 표시됩니다.</p>
+            <p className="status-text">예산 안에서 세트 보기를 누르면 추천 조합 결과가 여기에 표시됩니다.</p>
           ) : null}
 
           <div className="recommendation-list">

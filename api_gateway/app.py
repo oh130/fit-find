@@ -38,9 +38,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 DEFAULT_IMAGE_ROOT = Path("/app/data/raw/images")
 LOCAL_IMAGE_ROOT = Path(__file__).resolve().parents[1] / "data" / "raw" / "images"
+USB_IMAGE_ROOT = Path("D:/imagedata")
 IMAGE_ROOT = Path(os.getenv("IMAGE_ROOT", str(DEFAULT_IMAGE_ROOT)))
-if not IMAGE_ROOT.exists() and LOCAL_IMAGE_ROOT.exists():
-    IMAGE_ROOT = LOCAL_IMAGE_ROOT
+if not IMAGE_ROOT.exists():
+    for candidate in (LOCAL_IMAGE_ROOT, USB_IMAGE_ROOT):
+        if candidate.exists():
+            IMAGE_ROOT = candidate
+            break
 
 ARTICLES_PATH = Path("/app/data/processed/articles_feature.csv")
 # item_features_{test,dev,prod}.csv — avg_price 컬럼 포함
@@ -114,6 +118,13 @@ def image_path_for_article(article_id: str) -> Path:
     if not normalized_id.isdigit() or len(normalized_id) < 3:
         raise HTTPException(status_code=400, detail="Invalid article_id")
     return IMAGE_ROOT / normalized_id[:3] / f"{normalized_id}.jpg"
+
+
+def image_url_for_article(article_id: str) -> str:
+    normalized_id = article_id.strip()
+    if not normalized_id or not normalized_id.isdigit():
+        return ""
+    return f"/api/images/{normalized_id}"
 
 
 # ── 요청/응답 스키마 ──────────────────────────────────────────
@@ -379,6 +390,7 @@ def _enrich_search_results(items: list[dict]) -> list[dict]:
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
             "price": meta.get("price", 0),
+            "image_url": image_url_for_article(pid),
         })
     return enriched_results
 
@@ -397,6 +409,7 @@ def _enrich_recommendation_results(items: list[dict]) -> list[dict]:
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
             "price": meta.get("price", 0),
+            "image_url": image_url_for_article(pid),
         })
     return enriched_results
 
@@ -625,6 +638,7 @@ async def recommend(
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
             "price": meta.get("price", 0),
+            "image_url": image_url_for_article(pid),
         })
     result["recommendations"] = enriched
 
@@ -877,7 +891,13 @@ async def budget_set(
         meta = article_meta.get(pid, {})
         price_int = meta.get("price", 0) or DEFAULT_PRICE
         if price_int <= budget:
-            affordable.append({**item, **meta, "price_int": price_int, "article_id": pid})
+            affordable.append({
+                **item,
+                **meta,
+                "price_int": price_int,
+                "article_id": pid,
+                "image_url": image_url_for_article(pid),
+            })
 
     if len(affordable) < 2:
         raise HTTPException(status_code=400, detail="예산 내 추천 가능한 상품이 부족합니다")
