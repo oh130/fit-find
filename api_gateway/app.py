@@ -38,9 +38,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 DEFAULT_IMAGE_ROOT = Path("/app/data/raw/images")
 LOCAL_IMAGE_ROOT = Path(__file__).resolve().parents[1] / "data" / "raw" / "images"
+USB_IMAGE_ROOT = Path("D:/imagedata")
 IMAGE_ROOT = Path(os.getenv("IMAGE_ROOT", str(DEFAULT_IMAGE_ROOT)))
-if not IMAGE_ROOT.exists() and LOCAL_IMAGE_ROOT.exists():
-    IMAGE_ROOT = LOCAL_IMAGE_ROOT
+if not IMAGE_ROOT.exists():
+    for candidate in (LOCAL_IMAGE_ROOT, USB_IMAGE_ROOT):
+        if candidate.exists():
+            IMAGE_ROOT = candidate
+            break
 
 ARTICLES_PATH = Path("/app/data/processed/articles_feature.csv")
 # item_features_{test,dev,prod}.csv — avg_price 컬럼 포함
