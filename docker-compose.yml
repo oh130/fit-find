@@ -10,10 +10,12 @@ services:
       - SEARCH_ENGINE_URL=http://search-engine:8002
       - REC_MODELS_URL=http://rec-models:8003
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - IMAGE_ROOT=/imagedata
     depends_on:
       - redis
     volumes:
       - ./data:/app/data  # 공용 데이터 폴더 공유
+      - D:/imagedata:/imagedata:ro
 
   # B 파트 (검색)
   search-engine:
@@ -21,9 +23,12 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - SEARCH_ENGINE_MODE=test
+      - SEARCH_ENGINE_MODE=dev
+      - SEARCH_ENGINE_IMAGE_ROOT=/imagedata
     volumes:
       - ./data:/app/data
+      - ./search_engine/data/faiss_index:/app/data/faiss_index:ro
+      - D:/imagedata:/imagedata:ro
       - huggingface_cache:/root/.cache/huggingface
 
   # C 파트 (모델)
@@ -61,6 +66,15 @@ services:
     build: ./evaluation
     ports:
       - "8501:8501"
+    environment:
+      - REPORTS_ROOT=/rec_models/reports
+      - SEARCH_REPORT_PATH=/app/search_metrics_report.json
+      - API_GATEWAY_URL=http://api-gateway:8000
+    volumes:
+      - ./rec_models/reports:/rec_models/reports:ro
+      - ./evaluation/search_metrics_report.json:/app/search_metrics_report.json:ro
+    depends_on:
+      - api-gateway
 
   # CT 파이프라인
   ct-pipeline:

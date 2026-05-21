@@ -268,7 +268,8 @@ button {
 }
 
 .search-box,
-.user-id-field {
+.user-id-field,
+.target-audience-panel {
   display: grid;
   gap: 10px;
 }
@@ -278,12 +279,14 @@ button {
 .context-tile p,
 .result-meta p,
 .user-id-field span,
+.target-audience-panel span,
 .persona-card span {
   margin: 0;
 }
 
 .search-box span,
 .user-id-field span,
+.target-audience-panel span,
 .persona-card span {
   color: #666666;
   font-size: 0.9rem;
@@ -354,6 +357,12 @@ button {
 .signal-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.target-audience-buttons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -545,6 +554,27 @@ button {
   object-fit: cover;
 }
 
+.result-image-fallback {
+  width: 100%;
+  min-height: 152px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.84);
+  background: rgba(17, 17, 17, 0.18);
+}
+
+.result-image-fallback span {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(17, 17, 17, 0.28);
+  font-family: "DM Serif Display", serif;
+  font-size: 2rem;
+}
+
 .result-meta {
   display: grid;
   gap: 10px;
@@ -676,6 +706,10 @@ button {
   .recommendation-actions {
     width: 100%;
   }
+
+  .target-audience-buttons {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -712,6 +746,10 @@ button {
   }
 
   .result-image {
+    min-height: 180px;
+  }
+
+  .result-image-fallback {
     min-height: 180px;
   }
 }

@@ -2,10 +2,11 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import {
   BudgetSetBundle,
   OnboardingPersonaScores,
+  TargetAudience,
   fetchBudgetSets,
   fetchOnboardingPersonaScores,
   fetchPersonalizedSearchResults,
-  fetchRecommendations,
+  fetchResultExplanations,
   selectOnboardingPersona,
 } from "./api";
 
@@ -108,6 +109,13 @@ const personaOptions: PersonaOption[] = [
 
 const onboardingStyleOptions = ["casual", "minimal", "street", "sporty", "feminine", "classic"];
 
+const targetAudienceOptions: Array<{ key: TargetAudience; label: string }> = [
+  { key: "all", label: "전체" },
+  { key: "women", label: "여성" },
+  { key: "men", label: "남성" },
+  { key: "kids", label: "키즈" },
+];
+
 const emptyBudgetSetBundle: BudgetSetBundle = {
   budget: 0,
   setCount: 0,
@@ -123,11 +131,32 @@ function ResultVisual({
   title: string;
   accent: string;
 }) {
+  const [hasImageError, setHasImageError] = useState(false);
+  const shouldShowImage = Boolean(imageUrl) && !hasImageError;
+
   return (
     <div className="result-visual" style={{ background: accent }}>
-      {imageUrl ? <img className="result-image" src={imageUrl} alt={title} loading="lazy" /> : null}
+      {shouldShowImage ? (
+        <img
+          className="result-image"
+          src={imageUrl}
+          alt={title}
+          loading="lazy"
+          onError={() => setHasImageError(true)}
+        />
+      ) : (
+        <div className="result-image-fallback" aria-label={`${title} 이미지 준비 중`}>
+          <span>{title.slice(0, 1).toUpperCase()}</span>
+        </div>
+      )}
     </div>
   );
+}
+
+function toDisplayPercent(value: number): string {
+  const normalizedValue = value > 1 ? value / 100 : value;
+  const clampedValue = Math.max(0, Math.min(1, normalizedValue));
+  return `${(clampedValue * 100).toFixed(1)}%`;
 }
 
 function App() {
@@ -147,6 +176,7 @@ function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [recommendationWeight, setRecommendationWeight] = useState(0.7);
+  const [targetAudience, setTargetAudience] = useState<TargetAudience>("all");
   const [isRefreshingRecommendations, setIsRefreshingRecommendations] = useState(false);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
   const [topN, setTopN] = useState(5);
@@ -259,6 +289,8 @@ function App() {
         topN,
         mode: nextMode,
         personaHint: selectedOnboardingPersona,
+        personalizationWeight: recommendationWeight,
+        targetAudience,
       });
 
       setResults(response.similarity.items);
@@ -322,6 +354,7 @@ function App() {
         description: onboardingDescription.trim(),
         styleChoices: selectedStyles,
         budgetRange: null,
+        targetAudience,
       });
 
       setPersonaScores(scores);
@@ -352,6 +385,7 @@ function App() {
         budget: parsedBudget,
         setCount: 3,
         query: query.trim() || null,
+        targetAudience,
       });
       setBudgetSets(bundle);
     } catch {
@@ -378,14 +412,20 @@ function App() {
     setRecommendationError(null);
 
     try {
-      const bundle = await fetchRecommendations(userId.trim(), topN, Date.now(), {
-        personaHint: selectedOnboardingPersona,
-        personalizationWeight: recommendationWeight,
-        includeReasons: true,
+      const explanations = await fetchResultExplanations({
+        userId: userId.trim(),
+        query: query.trim(),
+        persona: selectedOnboardingPersona,
+        targetAudience,
+        items: targetResults.map((item) => ({
+          id: item.id,
+          title: item.title,
+          brand: item.brand,
+          price: item.price,
+        })),
       });
 
-      const reasonById = new Map(bundle.items.map((item) => [item.id, item.reason]));
-      const matchedCount = targetResults.filter((item) => reasonById.has(item.id)).length;
+      const reasonById = new Map(explanations.map((item) => [item.id, item.reason]));
       const nextResults = targetResults.map((item) => ({
         ...item,
         summary: reasonById.get(item.id) ?? item.summary,
@@ -397,8 +437,8 @@ function App() {
         setResults(nextResults);
       }
 
-      if (matchedCount === 0) {
-        setRecommendationError("현재 검색 결과와 연결된 추천 이유를 찾지 못해 기존 결과를 유지했습니다.");
+      if (reasonById.size === 0) {
+        setRecommendationError("현재 검색 결과에 대한 추천 이유를 생성하지 못했습니다.");
       }
     } catch (error) {
       const message =
@@ -418,6 +458,7 @@ function App() {
         userId: userId.trim() || "anonymous",
         persona: selectedOnboardingPersona,
         personaScores,
+        targetAudience,
       });
       setBudgetSets(emptyBudgetSetBundle);
       setView("search");
@@ -476,6 +517,22 @@ function App() {
           </div>
 
           <div className="search-composer">
+            <div className="target-audience-panel">
+              <span>쇼핑 대상</span>
+              <div className="target-audience-buttons" role="group" aria-label="쇼핑 대상 선택">
+                {targetAudienceOptions.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className={targetAudience === option.key ? "mini-button active" : "mini-button"}
+                    onClick={() => setTargetAudience(option.key)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <label className="user-id-field">
               <span>User ID</span>
               <input
@@ -619,7 +676,7 @@ function App() {
               </div>
               <div className="weight-control">
                 <div className="weight-labels">
-                  <span>기본 추천</span>
+                  <span>검색어 중심</span>
                   <span>취향 반영</span>
                 </div>
                 <input
@@ -767,7 +824,7 @@ function App() {
                     <p>{item.summary}</p>
                     <div className="result-stats">
                       <span className="badge">
-                        {mergedSearchScoreLabel} {(item.similarity * 100).toFixed(1)}%
+                        {mergedSearchScoreLabel} {toDisplayPercent(item.similarity)}
                       </span>
                       <span className="badge">{item.searchType}</span>
                       <span className="badge">응답 {item.responseTime}</span>
@@ -866,7 +923,7 @@ function App() {
                         <h4>{item.title}</h4>
                         <p>{item.category}</p>
                         <div className="result-stats">
-                          <span className="badge">세트 점수 {(item.score * 100).toFixed(1)}%</span>
+                          <span className="badge">세트 점수 {toDisplayPercent(item.score)}</span>
                           <span className="badge">{item.category}</span>
                         </div>
                       </div>

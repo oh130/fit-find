@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from urllib import error, request
 
@@ -8,21 +9,18 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-SEARCH_REPORT_PATH = Path(__file__).resolve().with_name("search_metrics_report.json")
-RECOMMENDATION_REPORT_PATH = (
-    Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "baseline" / "baseline_metrics.json"
-)
-RANKING_REPORTS_DIR = Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "ranking_experiments"
-BASELINE_REPORT_PATH = Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "baseline" / "baseline_metrics.json"
-PERSONA_AB_REPORT_PATH = (
-    Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "baseline" / "dev_spec_e2e_persona_optimized.json"
-)
-COVERAGE_AB_REPORT_PATH = (
-    Path(__file__).resolve().parents[1] / "rec_models" / "reports" / "baseline" / "dev_e2e_twotower_serving_coverage_strong.json"
-)
-ONBOARDING_API_URL = "http://127.0.0.1:8000/api/onboarding"
-RECOMMEND_API_URL = "http://127.0.0.1:8000/api/recommend"
-BUDGET_SET_API_URL = "http://127.0.0.1:8000/api/budget-set"
+APP_DIR = Path(__file__).resolve().parent
+REPORTS_ROOT = Path(os.getenv("REPORTS_ROOT", str(APP_DIR.parent / "rec_models" / "reports")))
+SEARCH_REPORT_PATH = Path(os.getenv("SEARCH_REPORT_PATH", str(APP_DIR / "search_metrics_report.json")))
+RECOMMENDATION_REPORT_PATH = REPORTS_ROOT / "baseline" / "baseline_metrics.json"
+RANKING_REPORTS_DIR = REPORTS_ROOT / "ranking_experiments"
+BASELINE_REPORT_PATH = REPORTS_ROOT / "baseline" / "baseline_metrics.json"
+PERSONA_AB_REPORT_PATH = REPORTS_ROOT / "baseline" / "dev_spec_e2e_persona_optimized.json"
+COVERAGE_AB_REPORT_PATH = REPORTS_ROOT / "baseline" / "dev_e2e_twotower_serving_coverage_strong.json"
+API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://127.0.0.1:8000").rstrip("/")
+ONBOARDING_API_URL = f"{API_GATEWAY_URL}/api/onboarding"
+RECOMMEND_API_URL = f"{API_GATEWAY_URL}/api/recommend"
+BUDGET_SET_API_URL = f"{API_GATEWAY_URL}/api/budget-set"
 
 PERSONA_LABELS = {
     "trendsetter": "트렌드세터형",
