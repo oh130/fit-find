@@ -54,13 +54,60 @@ button {
   min-height: 100vh;
 }
 
+.landing-shell {
+  display: grid;
+  align-items: center;
+  min-height: 100vh;
+}
+
 .topbar,
 .hero-panel,
 .panel,
-.onboarding-panel {
+.onboarding-panel,
+.landing-panel {
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(17, 17, 17, 0.08);
   box-shadow: 0 16px 48px rgba(17, 17, 17, 0.08);
+}
+
+.landing-panel {
+  border-radius: 36px;
+  padding: 56px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 20px;
+  min-height: 72vh;
+  align-content: center;
+  background:
+    radial-gradient(circle at top left, rgba(17, 17, 17, 0.06), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(245, 245, 245, 0.96) 100%);
+}
+
+.landing-panel h1 {
+  font-family: "DM Serif Display", serif;
+  font-weight: 400;
+  font-size: clamp(4rem, 9vw, 8rem);
+  line-height: 0.92;
+  margin: 0;
+  letter-spacing: -0.04em;
+}
+
+.landing-description {
+  margin: 0;
+  max-width: 48ch;
+  color: #525252;
+  font-size: 1.08rem;
+}
+
+.landing-actions {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  margin-top: 24px;
+}
+
+.landing-start-button {
+  min-width: 160px;
 }
 
 .topbar {
@@ -410,6 +457,7 @@ button {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  margin-top: 20px;
   margin-bottom: 16px;
   padding: 18px;
 }
@@ -610,7 +658,8 @@ button {
   .signal-list,
   .stage-list,
   .persona-grid,
-  .weight-panel {
+  .weight-panel,
+  .landing-actions {
     grid-template-columns: 1fr;
   }
 
@@ -638,7 +687,8 @@ button {
   .topbar,
   .hero-panel,
   .panel,
-  .onboarding-panel {
+  .onboarding-panel,
+  .landing-panel {
     padding: 18px;
     border-radius: 22px;
   }

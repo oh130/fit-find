@@ -377,12 +377,12 @@ function normalizePersonalizedSearchItems(
     brand: item.brand ?? "Unknown Brand",
     price: toCurrencyLabel(item.price),
     similarity: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
-    searchType: "내 취향순",
+    searchType: "내 취향 반영",
     responseTime,
     summary:
       item.reason_text ??
       item.reason ??
-      `${persona} 신호와 현재 검색 후보를 함께 반영한 재정렬 결과입니다.`,
+      `${persona} 선호와 현재 검색 후보를 함께 반영해 재정렬한 결과입니다.`,
     accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
     imageUrl: toImageUrl(item),
   }));
@@ -611,13 +611,18 @@ export async function fetchBudgetSets(input: {
   userId: string;
   budget: number;
   setCount?: number;
+  query?: string | null;
 }): Promise<BudgetSetBundle> {
   const url = new URL(buildApiUrl("/api/budget-set"), window.location.origin);
   url.searchParams.set("user_id", input.userId);
   url.searchParams.set("budget", String(input.budget));
   url.searchParams.set("set_count", String(input.setCount ?? 3));
+  if (input.query?.trim()) {
+    url.searchParams.set("query", input.query.trim());
+  }
 
   const response = await fetch(url.toString(), {
+    method: "POST",
     headers: {
       Accept: "application/json",
     },

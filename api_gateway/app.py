@@ -854,6 +854,7 @@ async def budget_set(
     user_id: str = Query(...),
     budget: int = Query(..., description="총 예산 (원)"),
     set_count: int = Query(3, description="구성할 세트 수"),
+    query: str | None = Query(None, description="현재 검색어"),
 ):
     """D: 예산 기반 패션 세트 추천.
 
@@ -864,12 +865,17 @@ async def budget_set(
     features = feature_store.get_user_features(user_id)
     raw_persona_scores = features.get("persona_scores", {})
     persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
+    session_interest = dict(features["session_interest"]) if features["session_interest"] else {}
+    inferred_interest = await _infer_session_interest_from_query(query)
+    if inferred_interest:
+        for category, score in inferred_interest.items():
+            session_interest[category] = session_interest.get(category, 0) + score
     params = {
         "user_id": user_id,
         "top_n": 50,
         "recent_clicks": ",".join(features["recent_clicks"]),
         "click_count": features["click_count"],
-        "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
+        "session_interest": json.dumps(session_interest) if session_interest else None,
         "persona_scores": json.dumps(persona_scores) if persona_scores else None,
     }
 
