@@ -135,6 +135,18 @@ PERSONA_PROFILE_KEYS = (
 DEFAULT_EXTERNAL_RECOMMENDATION_POOL = 40
 
 
+def _normalize_query_terms(terms: list[Any] | tuple[Any, ...] | None) -> list[str]:
+    normalized_terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in terms or ():
+        term = str(raw_term or "").strip().lower()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        normalized_terms.append(term)
+    return normalized_terms
+
+
 def _elapsed_ms(start_time: float) -> int:
     return int(round((time.perf_counter() - start_time) * 1000))
 
@@ -175,7 +187,15 @@ def _build_popularity_fallback(scored_candidates: pd.DataFrame) -> pd.DataFrame:
 
 
 def _random_seed_from_context(user_id: str, session_context: dict[str, Any]) -> int:
-    return hash((user_id, tuple(session_context["recent_clicks"][:5]), str(session_context["session_interest"]))) & 0xFFFFFFFF
+    return hash(
+        (
+            user_id,
+            tuple(session_context["recent_clicks"][:5]),
+            str(session_context["session_interest"]),
+            tuple(session_context.get("preferred_terms") or []),
+            tuple(session_context.get("avoid_terms") or []),
+        )
+    ) & 0xFFFFFFFF
 
 
 def _normalize_persona_score_vector(
@@ -354,6 +374,8 @@ def rerank_external_candidates(
     top_n: int = 10,
     recent_clicks: list[str] | None = None,
     session_interest: dict[str, Any] | None = None,
+    preferred_terms: list[Any] | tuple[Any, ...] | None = None,
+    avoid_terms: list[Any] | tuple[Any, ...] | None = None,
     rerank_weights: dict[str, Any] | None = None,
     persona_hint: str | None = None,
     persona_scores: dict[str, Any] | None = None,
@@ -375,9 +397,13 @@ def rerank_external_candidates(
         persona_hint=persona_hint,
         persona_scores=persona_scores,
     )
+    normalized_preferred_terms = _normalize_query_terms(preferred_terms)
+    normalized_avoid_terms = _normalize_query_terms(avoid_terms)
     session_context = {
         "recent_clicks": recent_clicks or [],
         "session_interest": effective_session_interest or None,
+        "preferred_terms": normalized_preferred_terms,
+        "avoid_terms": normalized_avoid_terms,
     }
     effective_rerank_weights = _build_rerank_weights(
         rerank_weights,
@@ -420,6 +446,8 @@ def rerank_external_candidates(
             top_k=top_n,
             recent_clicks=recent_clicks,
             session_interest=effective_session_interest,
+            preferred_terms=normalized_preferred_terms,
+            avoid_terms=normalized_avoid_terms,
             candidate_pool_size=max(top_n, recommendation_candidate_pool_size),
         )
         recommendation_frame["_candidate_source_order"] = 1
@@ -516,6 +544,8 @@ def recommend(
     recent_clicks: list[str] | None = None,
     click_count: int = 0,
     session_interest: dict[str, Any] | None = None,
+    preferred_terms: list[Any] | tuple[Any, ...] | None = None,
+    avoid_terms: list[Any] | tuple[Any, ...] | None = None,
     rerank_weights: dict[str, Any] | None = None,
     persona_hint: str | None = None,
     persona_scores: dict[str, Any] | None = None,
@@ -535,9 +565,13 @@ def recommend(
         persona_hint=persona_hint,
         persona_scores=persona_scores,
     )
+    normalized_preferred_terms = _normalize_query_terms(preferred_terms)
+    normalized_avoid_terms = _normalize_query_terms(avoid_terms)
     session_context = {
         "recent_clicks": recent_clicks or [],
         "session_interest": effective_session_interest or None,
+        "preferred_terms": normalized_preferred_terms,
+        "avoid_terms": normalized_avoid_terms,
     }
     effective_rerank_weights = _build_rerank_weights(
         rerank_weights,
@@ -558,6 +592,8 @@ def recommend(
         top_k=top_n,
         recent_clicks=recent_clicks,
         session_interest=effective_session_interest,
+        preferred_terms=normalized_preferred_terms,
+        avoid_terms=normalized_avoid_terms,
     )
     candidate_ms = _elapsed_ms(candidate_start)
 

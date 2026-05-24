@@ -13,6 +13,10 @@ import pandas as pd
 from sklearn.pipeline import Pipeline
 
 try:
+    from rec_models.serving.paths import (
+        resolve_existing_processed_path,
+        resolve_processed_path,
+    )
     from rec_models.ranking.infer import (
         DEFAULT_CHECKPOINT_DIR,
         _extract_scores,
@@ -33,6 +37,10 @@ try:
         USER_PERSONA_TEST_PATH,
     )
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from serving.paths import (  # type: ignore[no-redef]
+        resolve_existing_processed_path,
+        resolve_processed_path,
+    )
     from ranking.infer import (  # type: ignore[no-redef]
         DEFAULT_CHECKPOINT_DIR,
         _extract_scores,
@@ -56,13 +64,14 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 LOGGER = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-CUSTOMER_FEATURES_PATH = BASE_DIR / "data" / "processed" / "customer_features.csv"
+CUSTOMER_FEATURES_PATH = resolve_processed_path("CUSTOMER_FEATURES_PATH", "customer_features", ".csv")
 LEAKAGE_COLUMNS = {"label", "customer_id", "article_id", "price", "sales_channel_id"}
 DEFAULT_NUMERIC_VALUE = np.nan
 DEFAULT_CATEGORICAL_VALUE = "UNKNOWN"
 DEFAULT_REASON_VALUE = "unknown_candidate_reason"
 DEFAULT_CANDIDATE_PRIOR_WEIGHT = 0.15
+DEFAULT_QUERY_INTENT_SCORE_WEIGHT = 0.08
+DEFAULT_QUERY_AVOID_SCORE_WEIGHT = 0.12
 USER_PERSONA_SERVING_COLUMNS = [*PERSONA_RATIO_COLUMNS, "top_persona", "top_persona_ratio"]
 ITEM_PERSONA_SERVING_COLUMNS = [*PERSONA_RATIO_COLUMNS, "top_persona", "top_persona_ratio"]
 
@@ -105,17 +114,11 @@ def load_customer_features() -> pd.DataFrame:
 
 
 def _resolve_user_persona_path() -> Path | None:
-    for path in (USER_PERSONA_DEV_PATH, USER_PERSONA_PATH, USER_PERSONA_TEST_PATH):
-        if path.exists():
-            return path
-    return None
+    return resolve_existing_processed_path("USER_PERSONA_PATH", "user_persona_scores", ".csv")
 
 
 def _resolve_item_persona_path() -> Path | None:
-    for path in (ITEM_PERSONA_DEV_PATH, ITEM_PERSONA_PATH, ITEM_PERSONA_TEST_PATH):
-        if path.exists():
-            return path
-    return None
+    return resolve_existing_processed_path("ITEM_PERSONA_PATH", "item_persona_scores", ".csv")
 
 
 @lru_cache(maxsize=1)
@@ -254,6 +257,73 @@ def _normalize_session_interest(session_interest: Any) -> dict[str, float]:
         except (TypeError, ValueError):
             normalized[key] = 0.0
     return normalized
+
+
+def _normalize_query_terms(terms: Any) -> tuple[str, ...]:
+    if not isinstance(terms, (list, tuple, set)):
+        return ()
+    normalized_terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in terms:
+        term = str(raw_term or "").strip().lower()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        normalized_terms.append(term)
+    return tuple(normalized_terms)
+
+
+def _candidate_text(candidate_items: pd.DataFrame) -> pd.Series:
+    text_columns = [
+        "prod_name",
+        "product_type_name",
+        "product_group_name",
+        "department_name",
+        "section_name",
+        "garment_group_name",
+        "category",
+        "main_category",
+        "color",
+    ]
+    available = [column for column in text_columns if column in candidate_items.columns]
+    if not available:
+        return pd.Series("", index=candidate_items.index, dtype=object)
+    return (
+        candidate_items.reindex(columns=available)
+        .fillna("")
+        .astype(str)
+        .agg(" ".join, axis=1)
+        .str.lower()
+    )
+
+
+def _query_term_hit_count(text_values: pd.Series, terms: tuple[str, ...]) -> pd.Series:
+    if not terms:
+        return pd.Series(0, index=text_values.index, dtype="int64")
+    hits = pd.Series(0, index=text_values.index, dtype="int64")
+    for term in terms:
+        hits = hits + text_values.str.contains(term, regex=False, na=False).astype(int)
+    return hits
+
+
+def _apply_query_intent_score(scores: np.ndarray, candidate_items: pd.DataFrame, session_context: dict[str, Any] | None) -> np.ndarray:
+    if candidate_items.empty:
+        return scores
+
+    session_context = session_context or {}
+    preferred_terms = _normalize_query_terms(session_context.get("preferred_terms"))
+    avoid_terms = _normalize_query_terms(session_context.get("avoid_terms"))
+    if not preferred_terms and not avoid_terms:
+        return scores
+
+    text_values = _candidate_text(candidate_items)
+    preferred_hits = _query_term_hit_count(text_values, preferred_terms)
+    avoid_hits = _query_term_hit_count(text_values, avoid_terms)
+    return (
+        scores
+        + preferred_hits.to_numpy(dtype=float) * DEFAULT_QUERY_INTENT_SCORE_WEIGHT
+        - avoid_hits.to_numpy(dtype=float) * DEFAULT_QUERY_AVOID_SCORE_WEIGHT
+    )
 
 
 def _normalized_candidate_prior(candidate_items: pd.DataFrame) -> pd.Series:
@@ -489,15 +559,20 @@ def score_candidates(
         scores=_extract_scores(model=model, features=ranking_features),
         candidate_items=candidate_items,
     )
+    scores = _apply_query_intent_score(scores=scores, candidate_items=candidate_items, session_context=session_context)
 
     result = candidate_items.copy()
     result["score"] = scores
     cold_start_mask = result.get("candidate_reason", pd.Series(index=result.index, dtype=object)).eq("cold_start_popularity")
+    query_intent_mask = result.get("matches_query_intent", pd.Series(False, index=result.index)).fillna(False).astype(bool)
+    preferred_terms = _normalize_query_terms((session_context or {}).get("preferred_terms"))
+    if preferred_terms:
+        query_intent_mask = query_intent_mask | _query_term_hit_count(_candidate_text(result), preferred_terms).gt(0)
     session_interest_mask = result.get("matches_session_interest", pd.Series(False, index=result.index)).fillna(False).astype(bool)
     recent_click_mask = result.get("matches_recent_click_signal", pd.Series(False, index=result.index)).fillna(False).astype(bool)
     result["reason"] = np.select(
-        [cold_start_mask, session_interest_mask, recent_click_mask],
-        ["cold_start_popularity", "session_interest_match", "recent_click_similarity"],
+        [query_intent_mask, cold_start_mask, session_interest_mask, recent_click_mask],
+        ["query_intent_match", "cold_start_popularity", "session_interest_match", "recent_click_similarity"],
         default="ranking_score",
     )
     result["is_exploration"] = False

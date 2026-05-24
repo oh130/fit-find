@@ -71,6 +71,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the popularity baseline comparison.",
     )
+    parser.add_argument(
+        "--cold-start-holdout-users",
+        type=int,
+        default=0,
+        help=(
+            "Treat the first N sampled users as synthetic cold-start users by "
+            "masking their serving profile during the cold-start subset eval."
+        ),
+    )
+    parser.add_argument(
+        "--cold-start-keep-session",
+        action="store_true",
+        help="Keep recent-click/session-interest signals for synthetic cold-start users.",
+    )
     return parser.parse_args()
 
 
@@ -115,6 +129,12 @@ def build_cold_start_user_set(user_ids: list[str]) -> set[str]:
     return {user_id for user_id in user_ids if user_id not in known_users}
 
 
+def build_synthetic_cold_start_user_set(user_ids: list[str], holdout_users: int) -> set[str]:
+    if holdout_users <= 0:
+        return set()
+    return set(user_ids[: min(holdout_users, len(user_ids))])
+
+
 def popularity_recommendations(user_rows: pd.DataFrame, top_k: int) -> list[str]:
     """Return a popularity-only baseline ranking for one user's candidates."""
 
@@ -155,11 +175,17 @@ def evaluate_recommender(
     enable_exploration: bool = True,
     enable_freshness: bool = True,
     use_serving_candidates: bool = False,
+    synthetic_cold_start_users: int = 0,
+    cold_start_keep_session: bool = False,
 ) -> dict[str, Any]:
     """Evaluate the current serving ranking+rerranking pipeline."""
 
     evaluation_context = context or build_evaluation_context(data, max_users=max_users)
-    cold_start_users = build_cold_start_user_set(evaluation_context.sampled_user_ids)
+    synthetic_cold_users = build_synthetic_cold_start_user_set(
+        evaluation_context.sampled_user_ids,
+        synthetic_cold_start_users,
+    )
+    cold_start_users = synthetic_cold_users or build_cold_start_user_set(evaluation_context.sampled_user_ids)
     total_candidate_count = (
         int(load_article_catalog()["article_id"].astype(str).nunique())
         if use_serving_candidates
@@ -187,25 +213,32 @@ def evaluate_recommender(
             continue
 
         session_context = build_session_context(user_rows)
+        is_synthetic_cold_user = user_id in synthetic_cold_users
+        scoring_user_id = f"cold_start::{user_id}" if is_synthetic_cold_user else user_id
+        scoring_session_context = (
+            session_context
+            if not is_synthetic_cold_user or cold_start_keep_session
+            else {"recent_clicks": [], "session_interest": None}
+        )
         if use_serving_candidates:
             scored_user_rows = generate_candidates(
-                user_id=user_id,
+                user_id=scoring_user_id,
                 top_k=candidate_k,
-                recent_clicks=session_context.get("recent_clicks"),
-                session_interest=session_context.get("session_interest"),
+                recent_clicks=scoring_session_context.get("recent_clicks"),
+                session_interest=scoring_session_context.get("session_interest"),
             )
             if scored_user_rows.empty:
                 continue
         else:
-            scored_user_rows = scored_rows_by_id.get(user_id)
+            scored_user_rows = user_rows if is_synthetic_cold_user else scored_rows_by_id.get(user_id)
             if scored_user_rows is None or scored_user_rows.empty:
                 continue
 
         recommendations = rank_candidates_to_recommendations(
-            user_id=user_id,
+            user_id=scoring_user_id,
             candidate_items=scored_user_rows,
             top_n=top_k,
-            session_context=session_context,
+            session_context=scoring_session_context,
             enable_diversity=enable_reranking and enable_diversity,
             enable_exploration=enable_reranking and enable_exploration,
             enable_freshness=enable_reranking and enable_freshness,
@@ -233,6 +266,9 @@ def evaluate_recommender(
         k=top_k,
         evaluated_users=len(cold_ranked_lists),
     )
+    if synthetic_cold_users:
+        result["cold_start_subset"]["mode"] = "synthetic_profile_masked"
+        result["cold_start_subset"]["session_signals"] = "kept" if cold_start_keep_session else "masked"
     return result
 
 
@@ -243,11 +279,17 @@ def evaluate_popularity_baseline(
     max_users: int | None = None,
     context: EvaluationContext | None = None,
     use_serving_candidates: bool = False,
+    synthetic_cold_start_users: int = 0,
+    cold_start_keep_session: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a popularity-only baseline on the same user candidate sets."""
 
     evaluation_context = context or build_evaluation_context(data, max_users=max_users)
-    cold_start_users = build_cold_start_user_set(evaluation_context.sampled_user_ids)
+    synthetic_cold_users = build_synthetic_cold_start_user_set(
+        evaluation_context.sampled_user_ids,
+        synthetic_cold_start_users,
+    )
+    cold_start_users = synthetic_cold_users or build_cold_start_user_set(evaluation_context.sampled_user_ids)
     total_candidate_count = (
         int(load_article_catalog()["article_id"].astype(str).nunique())
         if use_serving_candidates
@@ -266,11 +308,18 @@ def evaluate_popularity_baseline(
 
         if use_serving_candidates:
             session_context = build_session_context(user_rows)
+            is_synthetic_cold_user = user_id in synthetic_cold_users
+            scoring_user_id = f"cold_start::{user_id}" if is_synthetic_cold_user else user_id
+            scoring_session_context = (
+                session_context
+                if not is_synthetic_cold_user or cold_start_keep_session
+                else {"recent_clicks": [], "session_interest": None}
+            )
             candidate_items = generate_candidates(
-                user_id=user_id,
+                user_id=scoring_user_id,
                 top_k=candidate_k,
-                recent_clicks=session_context.get("recent_clicks"),
-                session_interest=session_context.get("session_interest"),
+                recent_clicks=scoring_session_context.get("recent_clicks"),
+                session_interest=scoring_session_context.get("session_interest"),
             )
             if candidate_items.empty:
                 continue
@@ -299,6 +348,9 @@ def evaluate_popularity_baseline(
         k=top_k,
         evaluated_users=len(cold_ranked_lists),
     )
+    if synthetic_cold_users:
+        result["cold_start_subset"]["mode"] = "synthetic_profile_masked"
+        result["cold_start_subset"]["session_signals"] = "kept" if cold_start_keep_session else "masked"
     return result
 
 
@@ -321,6 +373,14 @@ def build_comparison_summary(
         hit_key: ranking_metrics[hit_key] - baseline_metrics[hit_key],
         ndcg_key: ranking_metrics[ndcg_key] - baseline_metrics[ndcg_key],
         coverage_key: ranking_metrics[coverage_key] - baseline_metrics[coverage_key],
+    }
+
+    ranking_cold = ranking_metrics.get("cold_start_subset", {})
+    baseline_cold = baseline_metrics.get("cold_start_subset", {})
+    summary["cold_start_improvement_vs_popularity"] = {
+        hit_key: ranking_cold.get(hit_key, 0.0) - baseline_cold.get(hit_key, 0.0),
+        ndcg_key: ranking_cold.get(ndcg_key, 0.0) - baseline_cold.get(ndcg_key, 0.0),
+        coverage_key: ranking_cold.get(coverage_key, 0.0) - baseline_cold.get(coverage_key, 0.0),
     }
     return summary
 
@@ -364,6 +424,13 @@ def print_evaluation_report(results: dict[str, Any], top_k: int) -> None:
         print(_format_metric_line(ndcg_key, improvement[ndcg_key]))
         print(_format_metric_line(coverage_key, improvement[coverage_key]))
 
+        cold_improvement = results.get("cold_start_improvement_vs_popularity")
+        if cold_improvement is not None:
+            print("\nCold Start Improvement vs Popularity")
+            print(_format_metric_line(hit_key, cold_improvement[hit_key]))
+            print(_format_metric_line(ndcg_key, cold_improvement[ndcg_key]))
+            print(_format_metric_line(coverage_key, cold_improvement[coverage_key]))
+
 
 def main() -> None:
     args = parse_args()
@@ -383,6 +450,8 @@ def main() -> None:
         enable_exploration=enable_exploration,
         enable_freshness=enable_freshness,
         use_serving_candidates=args.use_serving_candidates,
+        synthetic_cold_start_users=args.cold_start_holdout_users,
+        cold_start_keep_session=args.cold_start_keep_session,
     )
     baseline_metrics = None
     if not args.skip_popularity_baseline:
@@ -392,6 +461,8 @@ def main() -> None:
             candidate_k=args.candidate_k,
             max_users=args.max_users,
             use_serving_candidates=args.use_serving_candidates,
+            synthetic_cold_start_users=args.cold_start_holdout_users,
+            cold_start_keep_session=args.cold_start_keep_session,
         )
 
     results = build_comparison_summary(
@@ -413,6 +484,8 @@ def main() -> None:
                 "max_users": args.max_users,
                 "use_serving_candidates": args.use_serving_candidates,
                 "skip_popularity_baseline": args.skip_popularity_baseline,
+                "cold_start_holdout_users": args.cold_start_holdout_users,
+                "cold_start_keep_session": args.cold_start_keep_session,
                 "enable_reranking": enable_reranking,
                 "enable_diversity": enable_reranking and enable_diversity,
                 "enable_exploration": enable_reranking and enable_exploration,

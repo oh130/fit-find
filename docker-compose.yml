@@ -10,6 +10,7 @@ services:
       - SEARCH_ENGINE_URL=http://search-engine:8002
       - REC_MODELS_URL=http://rec-models:8003
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - IMAGE_ROOT=/app/data/raw/images
     depends_on:
       - redis
     volumes:
@@ -21,7 +22,9 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - SEARCH_ENGINE_MODE=test
+      - SEARCH_ENGINE_MODE=dev
+      - SEARCH_ENGINE_DATA_ROOT=/app/data/processed
+      - SEARCH_ENGINE_IMAGE_ROOT=/app/data/raw/images
     volumes:
       - ./data:/app/data
       - huggingface_cache:/root/.cache/huggingface
@@ -34,7 +37,8 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - RANKING_CHECKPOINT_DIR=/app/rec_models/checkpoints/logreg_dev
+      - REC_DATA_MODE=dev
+      - RANKING_CHECKPOINT_DIR=/app/data/checkpoints/logreg_dev
       - TWO_TOWER_CHECKPOINT_DIR=/app/data/checkpoints/candidate_dev_history_itemid_fast
     depends_on:
       - redis
@@ -61,6 +65,15 @@ services:
     build: ./evaluation
     ports:
       - "8501:8501"
+    environment:
+      - REPORTS_ROOT=/rec_models/reports
+      - SEARCH_REPORT_PATH=/app/search_metrics_report.json
+      - API_GATEWAY_URL=http://api-gateway:8000
+    volumes:
+      - ./rec_models/reports:/rec_models/reports:ro
+      - ./evaluation/search_metrics_report.json:/app/search_metrics_report.json:ro
+    depends_on:
+      - api-gateway
 
   # CT 파이프라인
   ct-pipeline:

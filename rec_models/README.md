@@ -160,6 +160,7 @@ Request
 추가로 다음 기능도 지원합니다.
 
 - cold-start subset 평가
+- synthetic cold-start holdout 평가
 - popularity baseline 비교
 - JSON 결과 저장
 
@@ -269,6 +270,16 @@ data/checkpoints/candidate_dev_history_itemid_fast/two_tower_metadata.json
 
 Ranking checkpoint는 `RANKING_CHECKPOINT_DIR` 환경변수 경로에 artifact가 있으면 그 경로를 사용합니다. 없으면 `rec_models/checkpoints/logreg_dev`, `rec_models/checkpoints` 순서로 fallback합니다. Candidate checkpoint는 `TWO_TOWER_CHECKPOINT_DIR` 환경변수 경로에 `two_tower.pt`가 있으면 그 경로를 사용합니다. 없으면 `data/checkpoints/candidate_dev_history_itemid_fast`, `data/checkpoints/candidate_dev_history_lolo_fast`, `data/checkpoints/candidate` 순서로 fallback합니다.
 
+Serving 데이터 파일은 `REC_DATA_MODE=dev|test|production`으로 기본 탐색 순서를 제어합니다. 명시 경로가 필요하면 아래 환경변수를 사용할 수 있습니다.
+
+- `ARTICLE_FEATURES_PATH`
+- `ITEM_FEATURES_PATH`
+- `CUSTOMER_FEATURES_PATH`
+- `USER_PERSONA_PATH`
+- `ITEM_PERSONA_PATH`
+- `CANDIDATE_TRAINING_DATA_PATH`
+- `CANDIDATE_ITEM_FEATURES_PATH`
+
 artifact가 없다면 팀 공유 산출물을 위 경로에 배치하거나, dev 데이터 기준으로 아래 순서대로 생성합니다.
 
 ```bash
@@ -346,9 +357,22 @@ curl "http://localhost:8003/recommend?user_id=12345&top_n=10&recent_clicks=01087
   "recommendations": [
     {
       "product_id": "0751471001",
+      "name": "Sindra slim trouser",
+      "brand": "H&M · Ladieswear",
+      "category": "Trousers",
+      "main_category": "Garment Lower body",
+      "product_type": "Trousers",
+      "product_group": "Garment Lower body",
+      "color": "Black",
+      "avg_price": 0.025,
+      "price_krw": 25000,
+      "price": 25000,
+      "outfit_role": "lower",
+      "outfit_eligible": true,
       "score": 0.9132,
       "reason": "recent_click_similarity",
-      "is_exploration": false
+      "is_exploration": false,
+      "image_url": "/api/images/0751471001"
     },
     {
       "product_id": "0861234002",
@@ -372,6 +396,8 @@ curl "http://localhost:8003/recommend?user_id=12345&top_n=10&recent_clicks=01087
   }
 }
 ```
+
+`outfit_role`은 상품 메타데이터 기반 휴리스틱으로 `upper`, `lower`, `outer`, `dress`, `shoes`, `bag`, `accessory`, `swimwear`, `underwear`, `nightwear`, `unknown` 중 하나를 반환합니다. `outfit_eligible=false`인 상품은 예산 기반 코디 세트의 기본 후보에서 제외하기 위한 신호입니다.
 
 ### `POST /session/update`
 
@@ -486,6 +512,43 @@ CLI는 다음 결과를 함께 출력합니다.
 - cold-start subset metrics
 - popularity baseline metrics
 - improvement versus popularity baseline
+- cold-start improvement versus popularity baseline
+
+### Cold-start 확장 평가
+
+기존 dev split에 실제 신규 사용자가 충분하지 않을 때는 synthetic holdout으로 사용자 profile/session signal을 가려 cold-start를 평가합니다.
+
+```bash
+BANDIT_REDIS_ENABLED=0 .venv/bin/python -m rec_models.evaluation.evaluate_recommender \
+  --max-users 100 \
+  --cold-start-holdout-users 100 \
+  --experiment-name dev_cold_start_profile_masked_baseline_compare_100 \
+  --split-name dev_synthetic_cold_start_baseline_compare \
+  --output-json rec_models/reports/baseline/dev_cold_start_profile_masked_baseline_compare_100.json
+```
+
+serving candidate generation까지 포함하려면 아래 명령을 사용합니다.
+
+```bash
+BANDIT_REDIS_ENABLED=0 .venv/bin/python -m rec_models.evaluation.evaluate_recommender \
+  --use-serving-candidates \
+  --candidate-k 150 \
+  --max-users 50 \
+  --cold-start-holdout-users 50 \
+  --experiment-name dev_cold_start_serving_profile_masked_baseline_compare_50 \
+  --split-name dev_synthetic_cold_start_serving_baseline_compare \
+  --output-json rec_models/reports/baseline/dev_cold_start_serving_profile_masked_baseline_compare_50.json
+```
+
+### Bandit reward live 검증
+
+Redis가 켜진 상태에서 synthetic item으로 reward 누적, UCB score 상승, rerank 반영, 과도한 쏠림 여부를 검증합니다. 기본 동작은 테스트 item/user key를 마지막에 삭제합니다.
+
+```bash
+.venv/bin/python -m rec_models.evaluation.verify_bandit_rewards \
+  --rounds 36 \
+  --output-json rec_models/reports/bandit/dev_bandit_reward_long_run_36.json
+```
 
 ### 최종 dev 기준 결과
 
@@ -518,11 +581,14 @@ CLI는 다음 결과를 함께 출력합니다.
 - `rec_models/reports/baseline/dev_e2e_persona_latest_baseline_compare_1000.json`
 - `rec_models/reports/baseline/dev_e2e_persona_latest_5000.json`
 - `rec_models/reports/baseline/dev_serving_latency_persona_latest_top50_50users.json`
+- `rec_models/reports/baseline/dev_cold_start_profile_masked_baseline_compare_100.json`
+- `rec_models/reports/baseline/dev_cold_start_serving_profile_masked_baseline_compare_50.json`
+- `rec_models/reports/bandit/dev_bandit_reward_long_run_36.json`
 
 ## 7. 현재 한계
 
 - dev 기준 명세 지표는 통과했지만, full production data 기준 재검증은 별도 수행이 필요합니다.
-- cold-start fallback은 구현되어 있으나 dev E2E 샘플에서 cold-start subset이 0명이라 별도 subset metric은 없습니다.
+- cold-start fallback은 synthetic profile-masked holdout으로 평가합니다. 실제 production 신규 사용자 로그 기반 metric은 별도 수집이 필요합니다.
 - 데이터셋 구조와 positive label 추론 방식 때문에 평가 편향이 발생할 수 있습니다.
 - reward-aware exploration은 item-level UCB 기반이며, user-context별 posterior를 학습하는 contextual bandit은 아닙니다.
 - Session은 recent history/session signal 기반이며, GRU/Transformer session encoder는 후속 고도화 항목입니다.

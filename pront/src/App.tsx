@@ -2,13 +2,15 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import {
   BudgetSetBundle,
   OnboardingPersonaScores,
+  TargetAudience,
   fetchBudgetSets,
   fetchOnboardingPersonaScores,
   fetchPersonalizedSearchResults,
-  fetchRecommendations,
+  fetchResultExplanations,
   selectOnboardingPersona,
 } from "./api";
 
+type AppView = "landing" | "onboarding" | "search";
 type SearchMode = "text" | "image" | "multimodal";
 type SearchResultView = "similarity" | "personalized";
 
@@ -39,74 +41,80 @@ type PersonaOption = {
   traits: string[];
 };
 
-
 const personaOptions: PersonaOption[] = [
   {
     key: "trendsetter",
-    name: "트렌드세터형",
-    title: "새로운 스타일을 빠르게 시도해요",
-    summary: "유행과 변화에 민감하고 다양한 룩을 탐색하는 성향입니다.",
-    traits: ["유행 민감", "실험적", "빠른 반응"],
+    name: "트렌드 주도형",
+    title: "새로운 스타일에 대한 빠른 수용",
+    summary: "유행 변화에 민감한 스타일 탐색 성향",
+    traits: ["유행 민감", "스타일 시도", "빠른 반응"],
   },
   {
     key: "practical",
     name: "실용주의형",
-    title: "착용감과 활용도를 중요하게 봐요",
-    summary: "오래 입기 좋고 다양한 상황에 맞는 아이템을 선호합니다.",
+    title: "활용도와 편안함 중심의 선택",
+    summary: "다양한 상황에 어울리는 실용적 선호",
     traits: ["실용성", "기본 아이템", "활용도"],
   },
   {
     key: "value",
-    name: "가성비추구형",
-    title: "가격 대비 만족도를 중요하게 봐요",
-    summary: "할인과 가격 메리트를 함께 고려하는 성향입니다.",
+    name: "가성비 추구형",
+    title: "가격 대비 만족도 중심의 판단",
+    summary: "혜택과 가격 메리트를 함께 보는 소비 성향",
     traits: ["가격 민감", "할인 선호", "비교 구매"],
   },
   {
     key: "brand_loyal",
-    name: "브랜드충성형",
-    title: "익숙한 브랜드를 꾸준히 선택해요",
-    summary: "기존 만족 경험이 있는 브랜드와 카테고리를 반복 탐색합니다.",
+    name: "브랜드 충성형",
+    title: "선호 브랜드 중심의 반복 선택",
+    summary: "익숙한 브랜드 경험을 중시하는 구매 성향",
     traits: ["브랜드 선호", "재구매", "안정적 취향"],
   },
   {
     key: "impulse",
     name: "충동구매형",
-    title: "마음에 들면 빠르게 결정해요",
-    summary: "즉각적인 매력과 인상적인 디테일에 민감하게 반응합니다.",
+    title: "즉각적인 매력에 대한 빠른 반응",
+    summary: "첫인상과 디테일 중심의 직관적 선택",
     traits: ["빠른 결정", "즉흥성", "시각 반응"],
   },
   {
     key: "careful",
     name: "신중탐색형",
-    title: "여러 옵션을 오래 비교해요",
-    summary: "리뷰, 소재, 가격을 충분히 비교한 뒤 결정하는 성향입니다.",
+    title: "충분한 비교를 바탕으로 한 결정",
+    summary: "리뷰와 가격 정보를 살피는 신중한 탐색 성향",
     traits: ["비교 탐색", "정보 수집", "신중한 결정"],
   },
   {
     key: "repeat_stable",
     name: "반복구매형",
-    title: "비슷한 상품을 꾸준히 다시 찾아요",
-    summary: "익숙한 카테고리와 검증된 아이템을 반복 구매하는 성향입니다.",
+    title: "검증된 선택의 안정적 반복",
+    summary: "만족했던 제품을 다시 찾는 익숙한 소비 패턴",
     traits: ["재구매", "안정성", "반복 선택"],
   },
   {
     key: "color_focus",
     name: "색상집중형",
-    title: "선호하는 색감을 중심으로 봐요",
-    summary: "특정 컬러 계열을 우선해서 탐색하는 경향이 강합니다.",
+    title: "선호 색감 중심의 스타일 선택",
+    summary: "특정 컬러 계열을 우선으로 보는 시각적 취향",
     traits: ["컬러 우선", "톤 선호", "시각 취향"],
   },
   {
     key: "category_focus",
     name: "카테고리집중형",
-    title: "원하는 카테고리를 깊게 파고들어요",
-    summary: "특정 카테고리 안에서 다양한 옵션을 오래 비교합니다.",
-    traits: ["카테고리 몰입", "깊은 비교", "명확한 관심사"],
+    title: "관심 카테고리 안에서의 깊은 비교",
+    summary: "원하는 카테고리 안에서 옵션을 좁혀가는 탐색 성향",
+    traits: ["카테고리 몰입", "집중 비교", "명확한 관심사"],
   },
 ];
 
 const onboardingStyleOptions = ["casual", "minimal", "street", "sporty", "feminine", "classic"];
+
+const targetAudienceOptions: Array<{ key: TargetAudience; label: string }> = [
+  { key: "all", label: "전체" },
+  { key: "women", label: "여성" },
+  { key: "men", label: "남성" },
+  { key: "kids", label: "키즈" },
+];
 
 const emptyBudgetSetBundle: BudgetSetBundle = {
   budget: 0,
@@ -123,18 +131,38 @@ function ResultVisual({
   title: string;
   accent: string;
 }) {
+  const [hasImageError, setHasImageError] = useState(false);
+  const shouldShowImage = Boolean(imageUrl) && !hasImageError;
+
   return (
     <div className="result-visual" style={{ background: accent }}>
-      {imageUrl ? <img className="result-image" src={imageUrl} alt={title} loading="lazy" /> : null}
+      {shouldShowImage ? (
+        <img
+          className="result-image"
+          src={imageUrl}
+          alt={title}
+          loading="lazy"
+          onError={() => setHasImageError(true)}
+        />
+      ) : (
+        <div className="result-image-fallback" aria-label={`${title} 이미지 준비 중`}>
+          <span>{title.slice(0, 1).toUpperCase()}</span>
+        </div>
+      )}
     </div>
   );
 }
 
+function toDisplayPercent(value: number): string {
+  const normalizedValue = value > 1 ? value / 100 : value;
+  const clampedValue = Math.max(0, Math.min(1, normalizedValue));
+  return `${(clampedValue * 100).toFixed(1)}%`;
+}
+
 function App() {
-  const [isRegistered, setIsRegistered] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [view, setView] = useState<AppView>("landing");
   const [selectedOnboardingPersona, setSelectedOnboardingPersona] = useState("trendsetter");
-  const [query, setQuery] = useState("광택감 있는 블랙 아우터와 실버 포인트 자켓");
+  const [query, setQuery] = useState("광택감 있는 블랙 아우터와 슬림 팬츠 조합");
   const [userId, setUserId] = useState("user_1024");
   const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode>("multimodal");
@@ -148,15 +176,14 @@ function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [recommendationWeight, setRecommendationWeight] = useState(0.7);
+  const [targetAudience, setTargetAudience] = useState<TargetAudience>("all");
   const [isRefreshingRecommendations, setIsRefreshingRecommendations] = useState(false);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
-
   const [topN, setTopN] = useState(5);
   const [budget, setBudget] = useState("200000");
   const [budgetSets, setBudgetSets] = useState<BudgetSetBundle>(emptyBudgetSetBundle);
   const [isLoadingBudgetSets, setIsLoadingBudgetSets] = useState(false);
   const [budgetSetError, setBudgetSetError] = useState<string | null>(null);
-
   const [onboardingDescription, setOnboardingDescription] = useState("");
   const [selectedStyles, setSelectedStyles] = useState<string[]>(["minimal"]);
   const [personaScores, setPersonaScores] = useState<OnboardingPersonaScores>({});
@@ -172,7 +199,7 @@ function App() {
       return "텍스트 질의만으로 유사 상품을 찾습니다.";
     }
     if (searchMode === "image") {
-      return "업로드 이미지 특징을 기반으로 시각적으로 비슷한 상품을 찾습니다.";
+      return "업로드한 이미지 특징을 기반으로 시각적으로 비슷한 상품을 찾습니다.";
     }
     return "텍스트와 이미지 신호를 함께 반영해 더 강한 후보를 우선 정렬합니다.";
   }, [searchMode]);
@@ -184,40 +211,52 @@ function App() {
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
-      const nextView = event.state?.view;
-
-      if (showOnboarding && nextView !== "onboarding") {
-        isManagingHistoryRef.current = true;
-        setShowOnboarding(false);
-        isManagingHistoryRef.current = false;
+      const nextView = event.state?.view as AppView | undefined;
+      if (!nextView) {
+        return;
       }
+      isManagingHistoryRef.current = true;
+      setView(nextView);
+      isManagingHistoryRef.current = false;
     };
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [showOnboarding]);
+  }, []);
 
   useEffect(() => {
-    if (!isRegistered || isManagingHistoryRef.current) {
+    if (isManagingHistoryRef.current) {
       return;
     }
 
-    const currentView = window.history.state?.view;
-
-    if (showOnboarding && currentView !== "onboarding") {
-      window.history.pushState({ view: "onboarding" }, "");
+    const currentView = window.history.state?.view as AppView | undefined;
+    if (currentView === view) {
       return;
     }
 
-    if (!showOnboarding && currentView === "onboarding") {
-      window.history.replaceState({ view: "main" }, "");
+    if (!currentView) {
+      window.history.replaceState({ view }, "");
+      return;
     }
-  }, [isRegistered, showOnboarding]);
+
+    window.history.pushState({ view }, "");
+  }, [view]);
+
+  const clearSearchResults = () => {
+    setResults([]);
+    setPersonalizedResults([]);
+    setActiveLatency("0ms");
+    setPersonalizedLatency("0ms");
+    setSearchResultPersona("개인화 검색");
+    setSearchError(null);
+    setHasSearched(false);
+  };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
       setUploadedImage(null);
+      clearSearchResults();
       return;
     }
 
@@ -232,6 +271,7 @@ function App() {
         sizeLabel: `${sizeInMb.toFixed(2)}MB`,
         base64,
       });
+      clearSearchResults();
 
       setSearchMode((currentMode) => (currentMode === "text" ? "multimodal" : currentMode));
     };
@@ -257,23 +297,19 @@ function App() {
         userId: userId.trim() || "anonymous",
         query: trimmedQuery,
         imageBase64: uploadedImage?.base64 ?? null,
-        topK: 80,
+        topK: 150,
         topN,
         mode: nextMode,
         personaHint: selectedOnboardingPersona,
+        personalizationWeight: recommendationWeight,
+        targetAudience,
       });
 
-      if (response.similarity.items.length > 0) {
-        setResults(response.similarity.items);
-      } else {
-        setResults([]);
-      }
+      setResults(response.similarity.items);
       setActiveLatency(response.similarity.responseTime);
-
       setPersonalizedResults(response.personalized.items);
       setPersonalizedLatency(response.personalized.responseTime);
       setSearchResultPersona(response.personalized.persona);
-
     } catch (error) {
       setResults([]);
       setActiveLatency("0ms");
@@ -287,7 +323,6 @@ function App() {
     }
   };
 
-
   const toggleStyleChoice = (style: string) => {
     setSelectedStyles((current) =>
       current.includes(style) ? current.filter((value) => value !== style) : [...current, style],
@@ -295,6 +330,7 @@ function App() {
   };
 
   const updatePersonaScore = (personaKey: string, nextValue: number) => {
+    setSelectedOnboardingPersona(personaKey);
     setPersonaScores((current) => {
       const clampedValue = Math.max(0, Math.min(100, Math.round(nextValue)));
       const nextScores = {
@@ -302,29 +338,22 @@ function App() {
         [personaKey]: clampedValue,
       };
       const total = Object.values(nextScores).reduce((sum, value) => sum + value, 0);
+
       if (total > 100) {
         return current;
       }
-      const topPersona = Object.entries(nextScores).sort((a, b) => b[1] - a[1])[0]?.[0];
-      if (topPersona) {
-        setSelectedOnboardingPersona(topPersona);
-      }
+
       return nextScores;
     });
   };
 
-  const handleSignUp = () => {
-    if (!userId.trim()) {
-      return;
-    }
-
-    setIsRegistered(true);
-    setShowOnboarding(true);
+  const goToOnboarding = () => {
+    setView("onboarding");
   };
 
   const runOnboardingAnalysis = async () => {
     if (!userId.trim() || !onboardingDescription.trim()) {
-      setOnboardingError("사용자 ID와 취향 설명을 입력해 주세요.");
+      setOnboardingError("사용자 ID와 취향 입력 내용을 입력해 주세요.");
       return;
     }
 
@@ -337,6 +366,7 @@ function App() {
         description: onboardingDescription.trim(),
         styleChoices: selectedStyles,
         budgetRange: null,
+        targetAudience,
       });
 
       setPersonaScores(scores);
@@ -366,6 +396,8 @@ function App() {
         userId: userId.trim(),
         budget: parsedBudget,
         setCount: 3,
+        query: query.trim() || null,
+        targetAudience,
       });
       setBudgetSets(bundle);
     } catch {
@@ -382,37 +414,47 @@ function App() {
       return;
     }
 
+    const targetResults = hasPersonalizedSearchResults ? personalizedResults : results;
+    if (targetResults.length === 0) {
+      setRecommendationError("먼저 검색 결과를 불러온 뒤 추천 이유를 확인해 주세요.");
+      return;
+    }
+
     setIsRefreshingRecommendations(true);
     setRecommendationError(null);
 
     try {
-      const bundle = await fetchRecommendations(userId.trim(), topN, Date.now(), {
-        personaHint: selectedOnboardingPersona,
-        personalizationWeight: recommendationWeight,
-        includeReasons: true,
+      const explanations = await fetchResultExplanations({
+        userId: userId.trim(),
+        query: query.trim(),
+        persona: selectedOnboardingPersona,
+        targetAudience,
+        items: targetResults.map((item) => ({
+          id: item.id,
+          title: item.title,
+          brand: item.brand,
+          price: item.price,
+        })),
       });
 
-      const mappedResults: SearchResult[] = bundle.items.map((item) => ({
-        id: item.id,
-        title: item.title,
-        brand: item.brand,
-        price: item.price,
-        similarity: item.score,
-        searchType: "AI 추천",
-        responseTime: bundle.totalLatency,
-        summary: item.reason,
-        accent: item.accent,
-        imageUrl: item.imageUrl,
+      const reasonById = new Map(explanations.map((item) => [item.id, item.reason]));
+      const nextResults = targetResults.map((item) => ({
+        ...item,
+        summary: reasonById.get(item.id) ?? item.summary,
       }));
 
-      setPersonalizedResults(mappedResults);
-      setPersonalizedLatency(bundle.totalLatency);
-      setSearchResultPersona(bundle.persona);
-      setSearchResultView("personalized");
-      setHasSearched(true);
+      if (hasPersonalizedSearchResults) {
+        setPersonalizedResults(nextResults);
+      } else {
+        setResults(nextResults);
+      }
+
+      if (reasonById.size === 0) {
+        setRecommendationError("현재 검색 결과에 대한 추천 이유를 생성하지 못했습니다.");
+      }
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "AI 추천 결과를 불러오지 못했습니다.";
+        error instanceof Error ? error.message : "AI 추천 이유를 불러오지 못했습니다.";
       setRecommendationError(message);
     } finally {
       setIsRefreshingRecommendations(false);
@@ -428,9 +470,10 @@ function App() {
         userId: userId.trim() || "anonymous",
         persona: selectedOnboardingPersona,
         personaScores,
+        targetAudience,
       });
-      setShowOnboarding(false);
       setBudgetSets(emptyBudgetSetBundle);
+      setView("search");
     } catch {
       setOnboardingError("선택한 페르소나를 저장하지 못했습니다.");
     } finally {
@@ -440,9 +483,6 @@ function App() {
 
   const modeLabel =
     searchMode === "multimodal" ? "멀티모달" : searchMode === "image" ? "이미지" : "텍스트";
-  const rankedPersonas = personaOptions
-    .filter((persona) => (personaScores[persona.key] ?? 0) > 0)
-    .sort((left, right) => (personaScores[right.key] ?? 0) - (personaScores[left.key] ?? 0));
   const personaScoreTotal = Object.values(personaScores).reduce((sum, value) => sum + value, 0);
   const isPersonaScoreTotalValid = personaScoreTotal === 100;
   const hasPersonalizedSearchResults = hasSearched && personalizedResults.length > 0;
@@ -460,27 +500,68 @@ function App() {
         ? "검색 후보 안에서 개인화된 결과가 아직 없습니다. 검색을 다시 시도해 주세요."
         : "검색 결과가 없습니다. 검색어를 조금 더 구체적으로 바꿔 보세요.";
 
-  if (showOnboarding) {
+  if (view === "landing") {
+    return (
+      <div className="app-shell landing-shell">
+        <section className="landing-panel">
+          <h1>Fit-Find</h1>
+          <p className="landing-description">
+            멀티모달 검색과 개인화 추천을 결합한 패션 탐색 서비스.
+          </p>
+          <div className="landing-actions">
+            <button type="button" className="primary-button landing-start-button" onClick={goToOnboarding}>
+              시작하기
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (view === "onboarding") {
     return (
       <div className="app-shell onboarding-shell">
         <section className="onboarding-panel">
           <div className="onboarding-copy">
             <p className="eyebrow">Personalization Setup</p>
-            <h1>먼저 취향을 알려주시면 추천을 바로 맞춰드립니다.</h1>
-            <p>
-              취향 설명과 스타일 선택을 바탕으로 페르소나를 분석하고, 결과를 확정하면
-              개인화 추천에 즉시 반영됩니다.
-            </p>
+            <h1>개인화 추천을 위한 페르소나 설정</h1>
+            <p>취향 정보를 바탕으로 추천 결과를 맞춤 설정합니다.</p>
           </div>
 
           <div className="search-composer">
+            <div className="target-audience-panel">
+              <span>쇼핑 대상</span>
+              <div className="target-audience-buttons" role="group" aria-label="쇼핑 대상 선택">
+                {targetAudienceOptions.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className={targetAudience === option.key ? "mini-button active" : "mini-button"}
+                    onClick={() => setTargetAudience(option.key)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className="user-id-field">
+              <span>User ID</span>
+              <input
+                value={userId}
+                onChange={(event) => setUserId(event.target.value)}
+                placeholder="예: user_1024"
+                aria-label="온보딩 사용자 ID"
+              />
+            </label>
+
             <label className="search-box">
-              <span>취향 설명</span>
+              <span>취향 입력</span>
               <input
                 value={onboardingDescription}
                 onChange={(event) => setOnboardingDescription(event.target.value)}
-                placeholder="예: 미니멀한 블랙 아우터와 실용적인 출근룩을 자주 봅니다"
-                aria-label="온보딩 취향 설명"
+                placeholder="예: 미니멀한 블랙 아우터와 실용적인 출근룩을 자주 입습니다."
+                aria-label="온보딩 취향 입력"
               />
             </label>
 
@@ -498,20 +579,25 @@ function App() {
             </div>
 
             <div className="recommendation-toolbar">
-              <button
-                type="button"
-                className="primary-button"
-                onClick={runOnboardingAnalysis}
-                disabled={isAnalyzingOnboarding}
-              >
-                {isAnalyzingOnboarding ? "분석 중..." : "취향 분석하기"}
-              </button>
+              <div className="recommendation-actions">
+                <button type="button" className="mini-button" onClick={() => setView("landing")}>
+                  이전
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={runOnboardingAnalysis}
+                  disabled={isAnalyzingOnboarding}
+                >
+                  {isAnalyzingOnboarding ? "분석 중..." : "취향 분석하기"}
+                </button>
+              </div>
             </div>
           </div>
 
-          {rankedPersonas.length > 0 ? (
+          {Object.keys(personaScores).length > 0 ? (
             <div className="persona-grid">
-              {rankedPersonas.map((persona) => (
+              {personaOptions.map((persona) => (
                 <article
                   key={persona.key}
                   className={
@@ -546,7 +632,7 @@ function App() {
 
           <div className="onboarding-footer">
             <div className="persona-card">
-              <span>?? ??</span>
+              <span>총합 점수</span>
               <strong>{personaScoreTotal}%</strong>
             </div>
             <button
@@ -557,15 +643,17 @@ function App() {
                 isSubmittingPersona || Object.keys(personaScores).length === 0 || !isPersonaScoreTotalValid
               }
             >
-              {isSubmittingPersona ? "?? ?..." : "? ???? ?? ??"}
+              {isSubmittingPersona ? "저장 중..." : "검색 페이지로 이동"}
             </button>
           </div>
-          {rankedPersonas.length > 0 ? (
+
+          {Object.keys(personaScores).length > 0 ? (
             <p className="persona-adjustment-note">
-              ????? ?? ?????. ????? ??? ?? ??? ???.
-              {!isPersonaScoreTotalValid ? " ??? 100%? ??? ?? ??? ??? ? ????." : ""}
+              슬라이더를 조정하면서 원하는 비중으로 맞춰 보세요.
+              {!isPersonaScoreTotalValid ? " 전체 합계가 100%가 되어야 다음 단계로 진행할 수 있습니다." : ""}
             </p>
           ) : null}
+
           {onboardingError ? <p className="status-text">{onboardingError}</p> : null}
         </section>
       </div>
@@ -577,64 +665,31 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Fit-Find</p>
-          <h1>Fit-Find: 취향 기반 멀티모달·멀티스테이지 패션 검색 및 추천</h1>
+          <h1>Fit-Find: 취향 기반 멀티모달 패션 검색 및 추천</h1>
+        </div>
+        <div className="topbar-meta">
+          <span>현재 사용자: {userId}</span>
+          <button type="button" className="mini-button" onClick={() => setView("onboarding")}>
+            페르소나 다시 정하기
+          </button>
         </div>
       </header>
 
       <main className="layout">
-        <section className="panel signup-panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">User Setup</p>
-              <h3>사용자 정보 설정</h3>
-            </div>
-          </div>
-          <div className="signup-row">
-            <label className="user-id-field">
-              <span>User ID</span>
-              <input
-                value={userId}
-                onChange={(event) => setUserId(event.target.value)}
-                placeholder="예: user_1024"
-                aria-label="회원가입 사용자 ID"
-              />
-            </label>
-            <button
-              type="button"
-              className="primary-button"
-              onClick={handleSignUp}
-              disabled={!userId.trim() || isRegistered}
-            >
-              {isRegistered ? "설정 완료" : "설정 시작"}
-            </button>
-          </div>
-          <p className="status-text signup-text">
-            사용자 정보를 설정한 뒤 취향 분석을 진행하면 초기 추천에 바로 반영됩니다.
-          </p>
-        </section>
-
         <section className="hero-panel">
           <div className="hero-copy">
             <p className="eyebrow">Search Experience</p>
-            <h2>검색 화면</h2>
-            <p className="hero-description">
-              검색어와 이미지를 함께 입력하면 상황에 맞는 검색 방식을 자동으로 적용하고,
-              결과 카드에는 유사도와 응답 시간을 함께 보여줍니다.
-            </p>
+            <h2>검색 입력</h2>
 
             <div className="panel weight-panel">
               <div className="weight-copy">
                 <p className="eyebrow">Result Balance</p>
-                <h4>개인화와 유사도 비중 조절</h4>
-                <p>
-                  개인화 {Math.round(recommendationWeight * 100)}% · 유사도{" "}
-                  {100 - Math.round(recommendationWeight * 100)}%
-                </p>
+                <h4>추천 반영도</h4>
               </div>
               <div className="weight-control">
                 <div className="weight-labels">
-                  <span>유사도 중심</span>
-                  <span>개인화 중심</span>
+                  <span>검색어 중심</span>
+                  <span>취향 반영</span>
                 </div>
                 <input
                   type="range"
@@ -642,8 +697,11 @@ function App() {
                   max="100"
                   step="5"
                   value={Math.round(recommendationWeight * 100)}
-                  onChange={(event) => setRecommendationWeight(Number(event.target.value) / 100)}
-                  aria-label="개인화 유사도 가중치"
+                  onChange={(event) => {
+                    setRecommendationWeight(Number(event.target.value) / 100);
+                    clearSearchResults();
+                  }}
+                  aria-label="추천 반영도"
                 />
               </div>
             </div>
@@ -656,20 +714,12 @@ function App() {
                 type="button"
                 className="primary-button"
                 onClick={loadAiRecommendations}
-                disabled={isRefreshingRecommendations || !isRegistered}
+                disabled={isRefreshingRecommendations}
               >
-                {isRefreshingRecommendations ? "AI 추천 불러오는 중..." : "AI 추천"}
-              </button>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={loadAiRecommendations}
-                disabled={isRefreshingRecommendations || !isRegistered}
-              >
-                {isRefreshingRecommendations ? "결과 새로고침 중..." : "결과 새로고침"}
+                {isRefreshingRecommendations ? "AI 추천 이유 불러오는 중..." : "AI 추천 이유"}
               </button>
             </div>
-            <p className="search-hint">텍스트만, 이미지만 또는 둘을 함께 검색할 수 있습니다.</p>
+            <p className="search-hint">텍스트만, 이미지만, 또는 둘을 함께 사용해 검색할 수 있습니다.</p>
             {recommendationError ? <p className="status-text">{recommendationError}</p> : null}
           </div>
 
@@ -678,21 +728,30 @@ function App() {
               <button
                 type="button"
                 className={searchMode === "text" ? "active" : ""}
-                onClick={() => setSearchMode("text")}
+                onClick={() => {
+                  setSearchMode("text");
+                  clearSearchResults();
+                }}
               >
                 텍스트
               </button>
               <button
                 type="button"
                 className={searchMode === "image" ? "active" : ""}
-                onClick={() => setSearchMode("image")}
+                onClick={() => {
+                  setSearchMode("image");
+                  clearSearchResults();
+                }}
               >
                 이미지
               </button>
               <button
                 type="button"
                 className={searchMode === "multimodal" ? "active" : ""}
-                onClick={() => setSearchMode("multimodal")}
+                onClick={() => {
+                  setSearchMode("multimodal");
+                  clearSearchResults();
+                }}
               >
                 텍스트 + 이미지
               </button>
@@ -702,8 +761,11 @@ function App() {
               <span>텍스트 검색어</span>
               <input
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="예: 광택감 있는 블랙 아우터와 실버 포인트 자켓"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  clearSearchResults();
+                }}
+                placeholder="예: 광택감 있는 블랙 아우터와 슬림 팬츠 조합"
                 aria-label="텍스트 검색어"
               />
             </label>
@@ -715,7 +777,7 @@ function App() {
                 <span>
                   {uploadedImage
                     ? `${uploadedImage.name} · ${uploadedImage.sizeLabel}`
-                    : "착장 사진, 스크린샷, 무드보드 이미지를 올려 보세요"}
+                    : "착장 사진, 스크린샷, 무드보드 이미지를 올려 보세요."}
                 </span>
               </label>
 
@@ -728,7 +790,7 @@ function App() {
             <div className="signal-list">
               <div className="signal-chip">
                 <strong>입력 텍스트</strong>
-                <span>{query.trim() || "텍스트 없이 이미지 기반 검색 대기 중"}</span>
+                <span>{query.trim() || "텍스트 없이 이미지 기반 검색만 대기 중입니다."}</span>
               </div>
               <div className="signal-chip">
                 <strong>업로드 이미지</strong>
@@ -739,19 +801,13 @@ function App() {
                 <span>{modeLabel}</span>
               </div>
             </div>
-
-            <div className="search-actions">
-              <span className="search-hint">????, ???? ?? ?? ?? ??? ? ????.</span>
-            </div>
           </form>
         </section>
 
         <section className="panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">
-                {hasSearched ? "Personalized Search Results" : "Search Results"}
-              </p>
+              <p className="eyebrow">Search Results</p>
               <h3>{hasSearched ? "검색과 추천을 함께 반영한 결과" : "검색 결과"}</h3>
             </div>
             <div className="heading-metrics">
@@ -768,7 +824,10 @@ function App() {
                     key={count}
                     type="button"
                     className={topN === count ? "mini-button active" : "mini-button"}
-                    onClick={() => setTopN(count)}
+                    onClick={() => {
+                      setTopN(count);
+                      clearSearchResults();
+                    }}
                   >
                     Top {count}
                   </button>
@@ -795,7 +854,7 @@ function App() {
                     <p>{item.summary}</p>
                     <div className="result-stats">
                       <span className="badge">
-                        {mergedSearchScoreLabel} {(item.similarity * 100).toFixed(1)}%
+                        {mergedSearchScoreLabel} {toDisplayPercent(item.similarity)}
                       </span>
                       <span className="badge">{item.searchType}</span>
                       <span className="badge">응답 {item.responseTime}</span>
@@ -814,7 +873,7 @@ function App() {
           <div className="section-heading">
             <div>
               <p className="eyebrow">Budget Set</p>
-              <h3>예산 안에서 구성한 추천 세트</h3>
+              <h3>예산 맞춤 추천</h3>
             </div>
             <div className="heading-metrics">
               <span className="metric">예산 {budgetLabel}</span>
@@ -831,7 +890,6 @@ function App() {
                   onChange={(event) => setUserId(event.target.value)}
                   placeholder="예: user_1024"
                   aria-label="예산 세트 사용자 ID"
-                  disabled={!isRegistered}
                 />
               </label>
               <label className="user-id-field budget-field">
@@ -852,9 +910,9 @@ function App() {
                 type="button"
                 className="primary-button"
                 onClick={loadBudgetSets}
-                disabled={isLoadingBudgetSets || !isRegistered}
+                disabled={isLoadingBudgetSets}
               >
-                {isLoadingBudgetSets ? "세트 구성 중..." : "예산 안에서 세트 보기"}
+                {isLoadingBudgetSets ? "세트 구성 중..." : "예산 적용하기"}
               </button>
             </div>
           </div>
@@ -862,7 +920,7 @@ function App() {
           {budgetSetError ? <p className="status-text">{budgetSetError}</p> : null}
 
           {budgetSets.sets.length === 0 ? (
-            <p className="status-text">예산 안에서 세트 보기를 누르면 추천 조합 결과가 여기에 표시됩니다.</p>
+            <p className="status-text">예산을 입력하고 적용하면 검색 결과에 반영됩니다.</p>
           ) : null}
 
           <div className="recommendation-list">
@@ -895,7 +953,7 @@ function App() {
                         <h4>{item.title}</h4>
                         <p>{item.category}</p>
                         <div className="result-stats">
-                          <span className="badge">세트 점수 {(item.score * 100).toFixed(1)}%</span>
+                          <span className="badge">세트 점수 {toDisplayPercent(item.score)}</span>
                           <span className="badge">{item.category}</span>
                         </div>
                       </div>

@@ -22,6 +22,7 @@ DEFAULT_SOFT_PRICE_PENALTY = 0.002
 DEFAULT_PERSONALIZATION_BLEND_STRENGTH = 0.035
 DEFAULT_SCORE_GAP_GUARD = 0.01
 MAX_RERANK_WEIGHT = 5.0
+PRICE_KRW_FACTOR = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -95,8 +96,14 @@ def _normalize_article_id(value: Any) -> str:
 def _sort_candidates(candidates: pd.DataFrame) -> pd.DataFrame:
     sortable = candidates.copy()
     sortable["score"] = pd.to_numeric(sortable.get("score"), errors="coerce").fillna(0.0)
-    sortable["popularity"] = pd.to_numeric(sortable.get("popularity"), errors="coerce").fillna(0.0)
-    sortable["item_age_days"] = pd.to_numeric(sortable.get("item_age_days"), errors="coerce")
+    sortable["popularity"] = pd.to_numeric(
+        sortable.get("popularity", pd.Series(0.0, index=sortable.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    sortable["item_age_days"] = pd.to_numeric(
+        sortable.get("item_age_days", pd.Series(float("nan"), index=sortable.index)),
+        errors="coerce",
+    )
     if "is_new_item" in sortable.columns:
         sortable["is_new_item"] = sortable["is_new_item"].fillna(False).astype(bool)
     else:
@@ -267,6 +274,59 @@ def _pick_reason(row: dict[str, Any], exploration_reason: str | None = None) -> 
 
 def _image_url_for_article(article_id: str) -> str:
     return f"/api/images/{article_id}"
+
+
+def _response_text(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == "UNKNOWN":
+        return None
+    return text
+
+
+def _response_float(value: Any) -> float | None:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
+def _response_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return bool(value)
+
+
+def _brand_label(row: dict[str, Any]) -> str:
+    department = _response_text(row.get("department_name"))
+    return f"H&M · {department}" if department else "H&M"
+
+
+def _recommendation_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    avg_price = _response_float(row.get("avg_price"))
+    price_krw = int(round(avg_price * PRICE_KRW_FACTOR)) if avg_price is not None and avg_price > 0 else None
+    outfit_role = _response_text(row.get("outfit_role")) or "unknown"
+
+    return {
+        "name": _response_text(row.get("prod_name")),
+        "brand": _brand_label(row),
+        "category": _response_text(row.get("category")) or _response_text(row.get("main_category")),
+        "main_category": _response_text(row.get("main_category")),
+        "product_type": _response_text(row.get("product_type_name")),
+        "product_group": _response_text(row.get("product_group_name")),
+        "color": _response_text(row.get("color")) or _response_text(row.get("colour_group_name")),
+        "avg_price": avg_price,
+        "price_krw": price_krw,
+        "price": price_krw,
+        "outfit_role": outfit_role,
+        "outfit_eligible": _response_bool(row.get("outfit_eligible", False)),
+    }
 
 
 def _display_scores(raw_scores: pd.Series) -> list[float]:
@@ -515,6 +575,7 @@ def rerank_recommendations(
                 "reason": _pick_reason(row),
                 "is_exploration": bool(row.get("is_exploration", False)),
                 "image_url": _image_url_for_article(product_id),
+                **_recommendation_metadata(row),
             }
         )
     return recommendations

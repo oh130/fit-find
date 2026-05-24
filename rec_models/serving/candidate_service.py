@@ -19,6 +19,12 @@ from typing import Any
 import pandas as pd
 
 try:
+    from rec_models.serving.paths import (
+        BASE_DIR,
+        processed_mode_candidates,
+        resolve_existing_processed_path,
+        resolve_processed_path,
+    )
     from rec_models.candidate.dataset import load_candidate_training_data
     from rec_models.candidate.infer import (
         DEFAULT_CHECKPOINT_DIR as DEFAULT_TWO_TOWER_CHECKPOINT_DIR,
@@ -29,6 +35,12 @@ try:
         retrieve_top_k,
     )
 except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from serving.paths import (  # type: ignore[no-redef]
+        BASE_DIR,
+        processed_mode_candidates,
+        resolve_existing_processed_path,
+        resolve_processed_path,
+    )
     from candidate.dataset import load_candidate_training_data  # type: ignore[no-redef]
     from candidate.infer import (  # type: ignore[no-redef]
         DEFAULT_CHECKPOINT_DIR as DEFAULT_TWO_TOWER_CHECKPOINT_DIR,
@@ -42,11 +54,9 @@ except ImportError:  # pragma: no cover - supports running from rec_models/ as c
 
 LOGGER = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-ARTICLE_FEATURES_PATH = BASE_DIR / "data" / "processed" / "articles_feature.csv"
-ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "item_features.csv"
-ITEM_FEATURES_DEV_PATH = BASE_DIR / "data" / "processed" / "item_features_dev.csv"
-ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "item_features_test.csv"
+ARTICLE_FEATURES_PATH = resolve_processed_path("ARTICLE_FEATURES_PATH", "articles_feature", ".csv")
+ITEM_FEATURES_PATHS = processed_mode_candidates("item_features", ".csv")
+PRICE_KRW_FACTOR = 1_000_000
 DEFAULT_CANDIDATE_POOL_SIZE = 75
 DEFAULT_NEW_ITEM_WINDOW_DAYS = 7
 DEFAULT_CANDIDATE_POOL_MULTIPLIER = 1.5
@@ -66,6 +76,9 @@ DEFAULT_SEQUENTIAL_CATEGORY_LIMIT = 40
 DEFAULT_SEQUENTIAL_ARTICLE_SCORE_WEIGHT = 8.0
 DEFAULT_SEQUENTIAL_CATEGORY_SCORE_WEIGHT = 4.0
 DEFAULT_COVERAGE_EXPLORATION_LIMIT = 500
+DEFAULT_QUERY_PREFERRED_SCORE_WEIGHT = 7.0
+DEFAULT_QUERY_AVOID_SCORE_WEIGHT = 9.0
+DEFAULT_QUERY_MATCH_LIMIT_MULTIPLIER = 8
 LOOKUP_COLUMNS = (
     "article_id",
     "prod_name",
@@ -83,6 +96,8 @@ LOOKUP_COLUMNS = (
     "avg_price",
     "item_age_days",
     "is_new_item",
+    "outfit_role",
+    "outfit_eligible",
 )
 
 
@@ -127,10 +142,7 @@ class SequentialTransitionStore:
 
 
 def _resolve_item_features_path() -> Path | None:
-    for path in (ITEM_FEATURES_DEV_PATH, ITEM_FEATURES_PATH, ITEM_FEATURES_TEST_PATH):
-        if path.exists():
-            return path
-    return None
+    return resolve_existing_processed_path("ITEM_FEATURES_PATH", "item_features", ".csv")
 
 
 def normalize_article_id(article_id: Any) -> str:
@@ -145,6 +157,69 @@ def normalize_article_id(article_id: Any) -> str:
 def _safe_text(value: Any) -> str:
     text = str(value).strip() if value is not None else ""
     return text or "UNKNOWN"
+
+
+def _combined_item_text(row: dict[str, Any] | pd.Series) -> str:
+    fields = (
+        "prod_name",
+        "product_type_name",
+        "product_group_name",
+        "department_name",
+        "section_name",
+        "garment_group_name",
+        "category",
+        "main_category",
+    )
+    return " ".join(str(row.get(field, "") or "").lower() for field in fields)
+
+
+def _normalize_query_terms(terms: list[Any] | tuple[Any, ...] | None) -> tuple[str, ...]:
+    normalized_terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in terms or ():
+        term = str(raw_term or "").strip().lower()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        normalized_terms.append(term)
+    return tuple(normalized_terms)
+
+
+def _count_query_term_hits(text: str, terms: tuple[str, ...]) -> int:
+    if not text or not terms:
+        return 0
+    return sum(1 for term in terms if term in text)
+
+
+def infer_outfit_role(row: dict[str, Any] | pd.Series) -> str:
+    """Infer a coarse outfit role from H&M article metadata."""
+
+    text = _combined_item_text(row)
+    if any(token in text for token in ("swim", "bikini", "swimsuit", "beachwear")):
+        return "swimwear"
+    if any(token in text for token in ("underwear", "bra", "brief", "panty", "lingerie", "sock", "tights")):
+        return "underwear"
+    if any(token in text for token in ("nightwear", "pyjama", "pajama", "sleep")):
+        return "nightwear"
+    if any(token in text for token in ("shoe", "sneaker", "trainer", "boot", "sandal", "slipper", "ballerina")):
+        return "shoes"
+    if "bag" in text or "backpack" in text or "wallet" in text:
+        return "bag"
+    if any(token in text for token in ("accessor", "belt", "scarf", "hat", "cap", "glove", "jewellery", "jewelry", "hair")):
+        return "accessory"
+    if any(token in text for token in ("dress", "jumpsuit", "playsuit", "overall", "dungaree")):
+        return "dress"
+    if any(token in text for token in ("coat", "jacket", "blazer", "cardigan", "outerwear", "parka", "vest")):
+        return "outer"
+    if any(token in text for token in ("trouser", "jean", "skirt", "shorts", "leggings", "jogger", "bottom")):
+        return "lower"
+    if any(token in text for token in ("shirt", "t-shirt", "tee", "top", "blouse", "sweater", "jumper", "hoodie", "knit")):
+        return "upper"
+    return "unknown"
+
+
+def is_outfit_eligible(outfit_role: str) -> bool:
+    return outfit_role not in {"swimwear", "underwear", "nightwear", "unknown"}
 
 
 def _build_lookup_map(catalog: pd.DataFrame, column: str) -> dict[str, tuple[str, ...]]:
@@ -169,9 +244,12 @@ def _build_article_records(catalog: pd.DataFrame, popularity_max: float) -> dict
             "popularity": popularity,
             "item_age_days": numeric_item_age_days,
             "is_new_item": is_new_item,
+            "outfit_role": _safe_text(row.get("outfit_role")),
+            "outfit_eligible": bool(row.get("outfit_eligible", False)),
             "normalized_popularity": popularity / popularity_max,
             "fresh_boost": 0.5 if is_new_item else 0.0,
             "derived_price_band": _derive_price_band(float(row.get("avg_price", 0.0) or 0.0)),
+            "price_krw": int(round(float(row.get("avg_price", 0.0) or 0.0) * PRICE_KRW_FACTOR)),
         }
     return records
 
@@ -201,10 +279,8 @@ def load_serving_artifacts() -> ServingFeatureStore:
         LOGGER.info("Loaded item feature file for serving: %s", item_features_path)
     else:
         LOGGER.warning(
-            "Item feature file not found. Checked %s, %s, and %s",
-            ITEM_FEATURES_DEV_PATH,
-            ITEM_FEATURES_PATH,
-            ITEM_FEATURES_TEST_PATH,
+            "Item feature file not found. Checked %s",
+            ", ".join(str(path) for path in ITEM_FEATURES_PATHS),
         )
         catalog["popularity"] = 0.0
         catalog["avg_price"] = 0.0
@@ -222,6 +298,8 @@ def load_serving_artifacts() -> ServingFeatureStore:
         catalog[column] = catalog[column].map(_safe_text)
     catalog["garment_group_name"] = catalog.get("garment_group_name", pd.Series("UNKNOWN", index=catalog.index)).map(_safe_text)
     catalog["derived_price_band"] = catalog["avg_price"].map(lambda value: _derive_price_band(float(value)))
+    catalog["outfit_role"] = catalog.apply(infer_outfit_role, axis=1)
+    catalog["outfit_eligible"] = catalog["outfit_role"].map(is_outfit_eligible)
 
     catalog = catalog.sort_values(["popularity", "article_id"], ascending=[False, True]).reset_index(drop=True)
     category_rank = catalog.groupby("main_category", dropna=False).cumcount()
@@ -556,6 +634,62 @@ def _accumulate_scores(
         candidate_matches[article_id] = True
 
 
+def _apply_query_intent_signals(
+    *,
+    feature_store: ServingFeatureStore,
+    candidate_scores: dict[str, float],
+    query_matches: dict[str, bool],
+    query_avoids: dict[str, bool],
+    reason_by_article: dict[str, str],
+    reason_priority_by_article: dict[str, int],
+    preferred_terms: tuple[str, ...],
+    avoid_terms: tuple[str, ...],
+    lookup_limit: int,
+    preferred_score_weight: float = DEFAULT_QUERY_PREFERRED_SCORE_WEIGHT,
+    avoid_score_weight: float = DEFAULT_QUERY_AVOID_SCORE_WEIGHT,
+) -> list[str]:
+    """Boost/demote candidates by matching query intent terms against catalog metadata."""
+
+    if not preferred_terms and not avoid_terms:
+        return []
+
+    scored_matches: list[tuple[str, float, int, int]] = []
+    scan_limit = max(lookup_limit * DEFAULT_QUERY_MATCH_LIMIT_MULTIPLIER, lookup_limit)
+    for article_id, record in feature_store.article_records.items():
+        text = _combined_item_text(record)
+        preferred_hits = _count_query_term_hits(text, preferred_terms)
+        avoid_hits = _count_query_term_hits(text, avoid_terms)
+        if preferred_hits <= 0 and avoid_hits <= 0:
+            continue
+
+        query_score = (preferred_hits * preferred_score_weight) - (avoid_hits * avoid_score_weight)
+        if preferred_hits > 0:
+            query_matches[article_id] = True
+            _set_candidate_reason(
+                reason_by_article=reason_by_article,
+                reason_priority_by_article=reason_priority_by_article,
+                article_id=article_id,
+                reason="query_intent_match",
+                priority=70,
+            )
+        if avoid_hits > 0:
+            query_avoids[article_id] = True
+
+        candidate_scores[article_id] = candidate_scores.get(article_id, 0.0) + query_score
+        scored_matches.append((article_id, query_score, preferred_hits, -avoid_hits))
+
+    scored_matches.sort(
+        key=lambda row: (
+            -row[1],
+            -row[2],
+            row[3],
+            -float(feature_store.article_records[row[0]].get("popularity", 0.0) or 0.0),
+            row[0],
+        )
+    )
+    return [article_id for article_id, score, _, _ in scored_matches[:scan_limit] if score > 0]
+
+
 def _materialize_candidates(
     selected_ids: list[str],
     feature_store: ServingFeatureStore,
@@ -564,6 +698,8 @@ def _materialize_candidates(
     session_matches: dict[str, bool],
     candidate_reason: str,
     reason_by_article: dict[str, str] | None = None,
+    query_matches: dict[str, bool] | None = None,
+    query_avoids: dict[str, bool] | None = None,
 ) -> pd.DataFrame:
     if not selected_ids:
         return pd.DataFrame(columns=LOOKUP_COLUMNS)
@@ -576,6 +712,8 @@ def _materialize_candidates(
     ]
     frame["matches_recent_click_signal"] = [bool(recent_matches.get(article_id, False)) for article_id in selected_ids]
     frame["matches_session_interest"] = [bool(session_matches.get(article_id, False)) for article_id in selected_ids]
+    frame["matches_query_intent"] = [bool((query_matches or {}).get(article_id, False)) for article_id in selected_ids]
+    frame["matches_query_avoid"] = [bool((query_avoids or {}).get(article_id, False)) for article_id in selected_ids]
     return frame.reset_index(drop=True)
 
 
@@ -908,6 +1046,8 @@ def generate_candidates(
     top_k: int,
     recent_clicks: list[str] | None = None,
     session_interest: dict[str, Any] | None = None,
+    preferred_terms: list[Any] | tuple[Any, ...] | None = None,
+    avoid_terms: list[Any] | tuple[Any, ...] | None = None,
     candidate_pool_size: int | None = None,
     feature_store: ServingFeatureStore | None = None,
     user_profile_store: CandidateUserProfileStore | None = None,
@@ -938,12 +1078,14 @@ def generate_candidates(
     recent_clicks = [normalize_article_id(article_id) for article_id in (recent_clicks or []) if str(article_id).strip()]
     recent_click_set = set(recent_clicks)
     session_interest = session_interest or {}
+    normalized_preferred_terms = _normalize_query_terms(preferred_terms)
+    normalized_avoid_terms = _normalize_query_terms(avoid_terms)
 
     candidate_pool_size = candidate_pool_size or max(
         DEFAULT_CANDIDATE_POOL_SIZE,
         int(top_k * DEFAULT_CANDIDATE_POOL_MULTIPLIER),
     )
-    cold_start = not recent_clicks and not session_interest
+    cold_start = not recent_clicks and not session_interest and not normalized_preferred_terms and not normalized_avoid_terms
     signal_lookup_limit = max(candidate_pool_size * DEFAULT_SIGNAL_LOOKUP_LIMIT_MULTIPLIER, candidate_pool_size)
     profile_only_start = False
 
@@ -974,6 +1116,8 @@ def generate_candidates(
     candidate_scores: dict[str, float] = {}
     recent_matches: dict[str, bool] = {}
     session_matches: dict[str, bool] = {}
+    query_matches: dict[str, bool] = {}
+    query_avoids: dict[str, bool] = {}
     reason_by_article: dict[str, str] = {}
     reason_priority_by_article: dict[str, int] = {}
     if cold_start and profile_only_start:
@@ -1065,6 +1209,18 @@ def generate_candidates(
                 limit=signal_lookup_limit,
             )
 
+    prioritized_query_ids = _apply_query_intent_signals(
+        feature_store=feature_store,
+        candidate_scores=candidate_scores,
+        query_matches=query_matches,
+        query_avoids=query_avoids,
+        reason_by_article=reason_by_article,
+        reason_priority_by_article=reason_priority_by_article,
+        preferred_terms=normalized_preferred_terms,
+        avoid_terms=normalized_avoid_terms,
+        lookup_limit=signal_lookup_limit,
+    )
+
     for category, weight in session_interest.items():
         normalized_weight = float(weight) if weight is not None else 0.0
         normalized_category = _safe_text(category)
@@ -1097,6 +1253,8 @@ def generate_candidates(
             del candidate_scores[article_id]
             recent_matches.pop(article_id, None)
             session_matches.pop(article_id, None)
+            query_matches.pop(article_id, None)
+            query_avoids.pop(article_id, None)
             continue
 
         record = feature_store.article_records[article_id]
@@ -1168,6 +1326,14 @@ def generate_candidates(
     )
     selected_ids: list[str] = []
     seen_selected: set[str] = set()
+    for article_id in prioritized_query_ids:
+        if article_id in seen_selected:
+            continue
+        selected_ids.append(article_id)
+        seen_selected.add(article_id)
+        if len(selected_ids) >= candidate_pool_size:
+            break
+
     for article_id in prioritized_sequential_article_ids:
         if article_id in seen_selected:
             continue
@@ -1224,6 +1390,8 @@ def generate_candidates(
         session_matches=session_matches,
         candidate_reason="candidate_retrieval",
         reason_by_article=reason_by_article,
+        query_matches=query_matches,
+        query_avoids=query_avoids,
     )
 
     LOGGER.info(

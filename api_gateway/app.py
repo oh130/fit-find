@@ -79,6 +79,7 @@ def _load_article_meta() -> dict[str, dict]:
                     "name": row.get("prod_name", ""),
                     "brand": _brand_label(department_name),
                     "category": row.get("category", ""),
+                    "main_category": row.get("main_category", ""),
                     "color": row.get("color", ""),
                     "product_type": row.get("product_type_name", ""),
                     "price": 0,
@@ -127,6 +128,447 @@ def image_url_for_article(article_id: str) -> str:
     return f"/api/images/{normalized_id}"
 
 
+COLOR_QUERY_TERMS: dict[str, tuple[str, ...]] = {
+    "black": ("black", "검정", "검은", "블랙"),
+    "white": ("white", "흰색", "하얀", "화이트"),
+    "blue": ("blue", "파랑", "파란", "블루", "네이비"),
+    "red": ("red", "빨강", "빨간", "레드"),
+    "pink": ("pink", "핑크", "분홍"),
+    "grey": ("grey", "gray", "회색", "그레이"),
+    "beige": ("beige", "베이지"),
+    "green": ("green", "초록", "그린", "카키"),
+    "yellow": ("yellow", "노랑", "옐로"),
+}
+
+TARGET_AUDIENCE_TO_MAIN_CATEGORY: dict[str, set[str]] = {
+    "all": set(),
+    "women": {"Ladieswear"},
+    "men": {"Menswear"},
+    "kids": {"Baby/Children"},
+}
+
+TARGET_AUDIENCE_TO_INTEREST: dict[str, str] = {
+    "women": "Ladieswear",
+    "men": "Menswear",
+    "kids": "Kids",
+}
+
+
+def _normalize_target_audience(target_audience: str | None) -> str:
+    target = (target_audience or "all").strip().lower()
+    return target if target in TARGET_AUDIENCE_TO_MAIN_CATEGORY else "all"
+
+
+def _item_matches_target_audience(item: dict, target_audience: str | None) -> bool:
+    target = _normalize_target_audience(target_audience)
+    allowed = TARGET_AUDIENCE_TO_MAIN_CATEGORY[target]
+    if not allowed:
+        return True
+    return str(item.get("main_category", "")).strip() in allowed
+
+
+def _apply_target_audience_filter(
+    items: list[dict],
+    target_audience: str | None,
+    *,
+    min_results: int = 1,
+) -> list[dict]:
+    target = _normalize_target_audience(target_audience)
+    if target == "all":
+        return items
+    filtered = [item for item in items if _item_matches_target_audience(item, target)]
+    return filtered if len(filtered) >= min_results else items
+
+
+def _target_audience_interest(target_audience: str | None) -> str | None:
+    return TARGET_AUDIENCE_TO_INTEREST.get(_normalize_target_audience(target_audience))
+
+
+DEFAULT_PRICE_BY_PRODUCT: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("coat", "jacket", "blazer", "parka"), 79000),
+    (("dress", "jumpsuit", "playsuit"), 59000),
+    (("jeans", "trousers", "pants"), 49000),
+    (("skirt", "shorts"), 39000),
+    (("shirt", "blouse", "sweater", "cardigan", "hoodie", "sweatshirt"), 39000),
+    (("sneakers", "shoes", "boots"), 69000),
+    (("bag", "backpack"), 49000),
+    (("swimsuit", "bikini"), 29000),
+    (("t-shirt", "tee", "top", "vest"), 25000),
+)
+
+
+def _estimated_price_for_meta(meta: dict, item: dict | None = None) -> int:
+    item = item or {}
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            meta.get("category"),
+            meta.get("product_type"),
+            meta.get("name"),
+            item.get("category"),
+            item.get("product_type"),
+            item.get("name"),
+            item.get("title"),
+        )
+    )
+    for terms, price in DEFAULT_PRICE_BY_PRODUCT:
+        if any(term in haystack for term in terms):
+            return price
+    return 39000
+
+
+def _display_price(meta: dict, item: dict | None = None) -> tuple[int, bool]:
+    raw_price = meta.get("price", 0)
+    try:
+        price = int(float(raw_price or 0))
+    except (TypeError, ValueError):
+        price = 0
+    if price > 0:
+        return price, False
+    return _estimated_price_for_meta(meta, item), True
+
+PRODUCT_QUERY_TERMS: dict[str, tuple[str, ...]] = {
+    "dress": ("dress", "one-piece", "one piece", "원피스", "드레스"),
+    "t-shirt": ("t-shirt", "tee", "t shirt", "티셔츠", "반팔"),
+    "sweatshirt": ("sweatshirt", "sweat shirt", "맨투맨", "스웨트셔츠"),
+    "sweater": ("sweater", "knit", "knitwear", "jumper", "니트", "스웨터"),
+    "shirt": ("shirt", "셔츠"),
+    "blouse": ("blouse", "블라우스"),
+    "hoodie": ("hoodie", "hood", "후드", "후디"),
+    "jacket": ("jacket", "자켓", "재킷"),
+    "coat": ("coat", "코트"),
+    "skirt": ("skirt", "스커트", "치마"),
+    "trousers": ("trousers", "pants", "바지", "팬츠"),
+    "jeans": ("jeans", "denim", "청바지", "데님"),
+    "sneakers": ("sneakers", "운동화", "스니커즈"),
+    "boots": ("boots", "boot", "부츠"),
+    "shoes": ("shoes", "shoe", "신발"),
+    "bag": ("bag", "가방", "백"),
+}
+
+PRODUCT_MATCH_TERMS: dict[str, tuple[str, ...]] = {
+    "dress": ("dress",),
+    "t-shirt": ("t-shirt", "tee"),
+    "sweatshirt": ("sweatshirt", "sweat shirt"),
+    "sweater": ("sweater", "knit", "knitted", "jumper", "pullover", "cardigan"),
+    "shirt": ("shirt",),
+    "blouse": ("blouse",),
+    "hoodie": ("hoodie", "hooded", "hood"),
+    "jacket": ("jacket", "blazer", "parka"),
+    "coat": ("coat",),
+    "skirt": ("skirt",),
+    "trousers": ("trousers", "pants"),
+    "jeans": ("jeans", "denim"),
+    "sneakers": ("sneakers", "trainer"),
+    "boots": ("boots", "boot"),
+    "shoes": ("shoes", "shoe", "sneakers", "boots"),
+    "bag": ("bag",),
+}
+
+PRODUCT_DISPLAY_LABELS: dict[str, str] = {
+    "dress": "Dress",
+    "t-shirt": "T-shirt",
+    "sweatshirt": "Sweatshirt",
+    "sweater": "Sweater",
+    "shirt": "Shirt",
+    "blouse": "Blouse",
+    "hoodie": "Hoodie",
+    "jacket": "Jacket",
+    "coat": "Coat",
+    "skirt": "Skirt",
+    "trousers": "Trousers",
+    "jeans": "Jeans",
+    "sneakers": "Sneakers",
+    "boots": "Boots",
+    "shoes": "Shoes",
+    "bag": "Bag",
+}
+
+PRODUCT_EXCLUDE_TERMS: dict[str, tuple[str, ...]] = {
+    "shirt": ("t-shirt", "t shirt", "tee", "sweatshirt", "hoodie", "hooded"),
+    "sneakers": ("boots", "boot", "heels", "sandals"),
+    "boots": ("bootcut",),
+    "hoodie": (),
+}
+
+PRODUCT_DOMINANCE_RULES: dict[str, tuple[str, ...]] = {
+    "t-shirt": ("shirt",),
+    "hoodie": ("sweatshirt", "sweater"),
+    "sneakers": ("shoes",),
+    "boots": ("shoes",),
+}
+
+COMPLEMENT_PRODUCT_GROUPS: dict[str, tuple[str, ...]] = {
+    "dress": ("jacket", "coat", "sweater", "cardigan", "boots", "sneakers", "bag"),
+    "t-shirt": ("trousers", "jeans", "skirt", "jacket", "sneakers", "bag"),
+    "shirt": ("trousers", "jeans", "skirt", "jacket", "sneakers", "bag"),
+    "hoodie": ("trousers", "jeans", "sneakers", "jacket", "bag"),
+    "jacket": ("t-shirt", "shirt", "trousers", "jeans", "skirt", "dress"),
+    "coat": ("t-shirt", "shirt", "trousers", "jeans", "skirt", "dress"),
+    "skirt": ("t-shirt", "shirt", "sweater", "jacket", "sneakers"),
+    "trousers": ("t-shirt", "shirt", "sweater", "jacket", "sneakers"),
+    "jeans": ("t-shirt", "shirt", "sweater", "jacket", "sneakers"),
+    "sneakers": ("t-shirt", "hoodie", "trousers", "jeans"),
+    "bag": ("dress", "jacket", "t-shirt", "shirt"),
+}
+
+COLOR_COMPLEMENTS: dict[str, tuple[str, ...]] = {
+    "black": ("black", "white", "grey", "beige", "blue"),
+    "white": ("white", "black", "blue", "grey", "beige"),
+    "blue": ("blue", "white", "black", "grey"),
+    "red": ("red", "black", "white", "grey"),
+    "pink": ("pink", "white", "grey", "beige"),
+    "grey": ("grey", "black", "white", "blue"),
+    "beige": ("beige", "white", "black", "blue"),
+    "green": ("green", "black", "white", "beige"),
+    "yellow": ("yellow", "white", "blue", "black"),
+}
+
+PRODUCT_GROUP_PRIORITY: dict[str, int] = {
+    "jacket": 90,
+    "coat": 88,
+    "trousers": 86,
+    "jeans": 86,
+    "skirt": 84,
+    "sneakers": 82,
+    "boots": 82,
+    "bag": 78,
+    "hoodie": 72,
+    "sweatshirt": 71,
+    "sweater": 70,
+    "blouse": 69,
+    "shirt": 68,
+    "t-shirt": 66,
+    "dress": 64,
+    "shoes": 60,
+}
+
+
+def _derive_query_constraints(*texts: str | None) -> dict[str, set[str]]:
+    normalized = " ".join(text or "" for text in texts).lower()
+    colors = {
+        color
+        for color, terms in COLOR_QUERY_TERMS.items()
+        if any(term in normalized for term in terms)
+    }
+    products = {
+        product
+        for product, terms in PRODUCT_QUERY_TERMS.items()
+        if any(term in normalized for term in terms)
+    }
+    for specific_product, generic_products in PRODUCT_DOMINANCE_RULES.items():
+        if specific_product in products:
+            products.difference_update(generic_products)
+    return {"colors": colors, "products": products}
+
+
+def _item_product_text(item: dict) -> str:
+    return " ".join(
+        str(value or "")
+        for value in (
+            item.get("name"),
+            item.get("title"),
+            item.get("category"),
+            item.get("product_type"),
+            item.get("product_group"),
+            item.get("graphical_appearance"),
+            item.get("detail_desc"),
+        )
+    ).lower()
+
+
+def _item_matches_product(item: dict, product: str) -> bool:
+    text = _item_product_text(item)
+    terms = PRODUCT_MATCH_TERMS.get(product, (product,))
+    if not any(term in text for term in terms):
+        return False
+
+    exclude_terms = PRODUCT_EXCLUDE_TERMS.get(product, ())
+    return not any(term in text for term in exclude_terms)
+
+
+def _query_constraint_matches(items: list[dict], constraints: dict[str, set[str]]) -> list[dict]:
+    if not constraints["products"] and not constraints["colors"]:
+        return []
+    return [item for item in items if _item_matches_query_constraints(item, constraints)]
+
+
+def _prioritize_query_constraint_matches(items: list[dict], constraints: dict[str, set[str]]) -> list[dict]:
+    if not constraints["products"] and not constraints["colors"]:
+        return items
+
+    matching = _query_constraint_matches(items, constraints)
+    if not matching:
+        return items
+
+    matching_ids = {str(item.get("product_id", item.get("article_id", ""))) for item in matching}
+    non_matching = [
+        item
+        for item in items
+        if str(item.get("product_id", item.get("article_id", ""))) not in matching_ids
+    ]
+    return matching + non_matching
+
+
+def _matched_product_label(item: dict, constraints: dict[str, set[str]]) -> str | None:
+    matched_products = [
+        product
+        for product in constraints["products"]
+        if _item_matches_product(item, product)
+    ]
+    if not matched_products:
+        return None
+    best_product = max(matched_products, key=lambda product: PRODUCT_GROUP_PRIORITY.get(product, 0))
+    return PRODUCT_DISPLAY_LABELS.get(best_product)
+
+
+def _apply_query_product_labels(items: list[dict], constraints: dict[str, set[str]]) -> list[dict]:
+    if not constraints["products"]:
+        return items
+
+    labeled_items: list[dict] = []
+    for item in items:
+        label = _matched_product_label(item, constraints)
+        if not label:
+            labeled_items.append(item)
+            continue
+
+        labeled_items.append({
+            **item,
+            "category": label,
+            "product_type": label,
+            "matched_product_type": label,
+        })
+    return labeled_items
+
+
+def _item_matches_query_constraints(item: dict, constraints: dict[str, set[str]]) -> bool:
+    colors = constraints["colors"]
+    products = constraints["products"]
+    item_color = str(item.get("color", "")).lower()
+
+    if colors and not any(color in item_color for color in colors):
+        return False
+    if products and not any(_item_matches_product(item, product) for product in products):
+        return False
+    return True
+
+
+def _item_matches_query_color(item: dict, constraints: dict[str, set[str]]) -> bool:
+    colors = constraints["colors"]
+    if not colors:
+        return True
+    item_color = str(item.get("color", "")).lower()
+    return any(color in item_color for color in colors)
+
+
+def _item_matches_query_product(item: dict, constraints: dict[str, set[str]]) -> bool:
+    products = constraints["products"]
+    if not products:
+        return True
+    return any(_item_matches_product(item, product) for product in products)
+
+
+def _item_matches_any_product_group(item: dict, product_groups: set[str]) -> bool:
+    if not product_groups:
+        return True
+    return any(_item_matches_product(item, product) for product in product_groups)
+
+
+def _item_matches_complement_color(item: dict, colors: set[str]) -> bool:
+    if not colors:
+        return True
+    allowed_colors = set(colors)
+    for color in colors:
+        allowed_colors.update(COLOR_COMPLEMENTS.get(color, ()))
+    item_color = str(item.get("color", "")).lower()
+    return any(color in item_color for color in allowed_colors)
+
+
+def _complement_groups_for_constraints(constraints: dict[str, set[str]]) -> set[str]:
+    groups: set[str] = set()
+    for product in constraints["products"]:
+        groups.update(COMPLEMENT_PRODUCT_GROUPS.get(product, ()))
+    return groups
+
+
+def _product_group_priority(item: dict, product_groups: set[str]) -> int:
+    best = 0
+    for product in product_groups:
+        if _item_matches_product(item, product):
+            best = max(best, PRODUCT_GROUP_PRIORITY.get(product, 50))
+    return best
+
+
+def _blend_personalized_with_search_intent(
+    search_results: list[dict],
+    personalized_results: list[dict],
+    *,
+    query: str,
+    translated_query: str | None,
+    top_n: int,
+    personalization_weight: float | None = None,
+) -> list[dict]:
+    """Keep lexical search intent dominant; use personalization as a tie-breaker."""
+
+    constraints = _derive_query_constraints(query, translated_query)
+    constrained_results = _query_constraint_matches(search_results, constraints)
+    if len(constrained_results) >= max(3, min(top_n, len(search_results))):
+        search_results = constrained_results
+
+    slider_value = max(0.0, min(float(personalization_weight if personalization_weight is not None else 0.7), 1.0))
+    personal_blend = 0.08 + (0.32 * slider_value)
+    search_blend = 1.0 - personal_blend
+    personalized_by_id = {
+        str(item.get("product_id", "")): item
+        for item in personalized_results
+        if item.get("product_id") is not None
+    }
+    max_search_score = max((float(item.get("score") or 0.0) for item in search_results), default=1.0) or 1.0
+    max_personal_score = max((float(item.get("score") or 0.0) for item in personalized_results), default=1.0) or 1.0
+
+    candidates: list[tuple[float, int, dict]] = []
+    for index, search_item in enumerate(search_results):
+        product_id = str(search_item.get("product_id", ""))
+        personalized_item = personalized_by_id.get(product_id, {})
+        search_score = float(search_item.get("score") or 0.0) / max_search_score
+        personal_score = float(personalized_item.get("score") or 0.0) / max_personal_score
+        matches_query = _item_matches_query_constraints(search_item, constraints)
+        intent_bonus = 0.25 if matches_query else 0.0
+        combined_score = (search_blend * search_score) + (personal_blend * personal_score) + intent_bonus
+        merged_item = {
+            **search_item,
+            "score": combined_score,
+            "search_score": search_item.get("score"),
+            "personalized_score": personalized_item.get("score"),
+            "reason": personalized_item.get("reason", search_item.get("reason", "search_intent_match")),
+            "is_exploration": bool(personalized_item.get("is_exploration", False)),
+        }
+        candidates.append((combined_score, index, merged_item))
+
+    full_matching_candidates = [
+        candidate
+        for candidate in candidates
+        if _item_matches_query_constraints(candidate[2], constraints)
+    ]
+    color_matching_candidates = [
+        candidate
+        for candidate in candidates
+        if _item_matches_query_color(candidate[2], constraints)
+    ]
+    if len(full_matching_candidates) >= max(3, top_n // 2):
+        pool = full_matching_candidates
+    elif constraints["colors"] and len(color_matching_candidates) >= top_n:
+        pool = color_matching_candidates
+    else:
+        pool = candidates
+    ranked = sorted(pool, key=lambda candidate: (-candidate[0], candidate[1]))
+    return [
+        {**item, "rank": rank}
+        for rank, (_, _, item) in enumerate(ranked[:top_n], 1)
+    ]
+
+
 # ── 요청/응답 스키마 ──────────────────────────────────────────
 
 class SearchRequest(BaseModel):
@@ -139,6 +581,8 @@ class PersonalizedSearchRequest(SearchRequest):
     user_id: str
     top_n: int = 10
     persona_hint: str | None = None
+    personalization_weight: float | None = None
+    target_audience: str | None = None
 
 
 class EventRequest(BaseModel):
@@ -150,11 +594,27 @@ class EventRequest(BaseModel):
     query_text: str | None = None
 
 
+class ExplainResultItem(BaseModel):
+    id: int | str
+    title: str = ""
+    brand: str = ""
+    price: str = ""
+
+
+class ExplainResultsRequest(BaseModel):
+    user_id: str
+    query: str = ""
+    persona: str | None = None
+    target_audience: str | None = None
+    items: list[ExplainResultItem]
+
+
 class OnboardingRequest(BaseModel):
     user_id: str
     description: str  # 자유 입력 (예: "미니멀한 스타일 좋아하는 20대 여성입니다")
     style_choices: list[str] = []  # 선택지 (예: ["casual", "minimal", "sporty"])
     budget_range: str | None = None  # "low" | "mid" | "high"
+    target_audience: str | None = None
 
 
 VALID_PERSONAS = (
@@ -377,19 +837,357 @@ async def _translate_to_english(query: str) -> str:
         return query
 
 
+SEARCH_INTENT_TERM_LIMIT = 12
+SEARCH_INTENT_AVOID_LIMIT = 10
+QUERY_RECOMMEND_INTEREST_MULTIPLIER = 3.0
+SITUATIONAL_SEARCH_INTENTS: tuple[tuple[tuple[str, ...], dict[str, object]], ...] = (
+    (
+        ("피방", "pc방", "피씨방", "피시방", "겜방", "게임방", "게임하러", "pc bang", "pc cafe", "gaming"),
+        {
+            "intent_label": "편한 PC방 캐주얼룩",
+            "preferred_terms": (
+                "hoodie", "hooded sweatshirt", "sweatshirt", "joggers", "sweatpants",
+                "relaxed trousers", "t-shirt", "sneakers", "comfortable casual", "streetwear",
+            ),
+            "avoid_terms": ("dress", "skirt", "blouse", "lingerie", "baby", "formal", "heels"),
+            "session_interest": {"Divided": 3, "Sport": 2},
+        },
+    ),
+    (
+        ("후드", "후디", "hoodie", "hood"),
+        {
+            "intent_label": "후드 캐주얼룩",
+            "preferred_terms": ("hoodie", "hooded sweatshirt", "sweatshirt", "casual", "streetwear"),
+            "avoid_terms": ("dress", "skirt", "lingerie", "baby", "formal"),
+            "session_interest": {"Divided": 2, "Sport": 1},
+        },
+    ),
+    (
+        ("츄리닝", "추리닝", "트레이닝복", "조거", "sweatpants", "jogger", "track pants"),
+        {
+            "intent_label": "트레이닝 캐주얼룩",
+            "preferred_terms": ("joggers", "sweatpants", "track pants", "training pants", "sneakers", "sport casual"),
+            "avoid_terms": ("dress", "skirt", "blouse", "lingerie", "baby", "formal"),
+            "session_interest": {"Sport": 3, "Divided": 2},
+        },
+    ),
+    (
+        ("편한", "편하게", "꾸안꾸", "데일리", "daily", "comfortable", "casual"),
+        {
+            "intent_label": "편한 데일리룩",
+            "preferred_terms": ("comfortable casual", "relaxed fit", "basic", "t-shirt", "sweatshirt", "trousers", "sneakers"),
+            "avoid_terms": ("lingerie", "baby", "formal"),
+            "session_interest": {"Divided": 2},
+        },
+    ),
+    (
+        ("데이트", "여자친구", "남자친구", "애인", "연인", "소개팅", "첫만남", "first date", "date outfit"),
+        {
+            "intent_label": "데이트/소개팅 스마트 캐주얼룩",
+            "preferred_terms": (
+                "shirt", "blouse", "knit", "sweater", "cardigan", "clean",
+                "smart casual", "trousers", "slacks", "dress", "loafers",
+            ),
+            "avoid_terms": (
+                "sweatpants", "joggers", "hoodie", "training pants", "sportswear",
+                "lingerie", "baby", "dirty", "worn",
+            ),
+            "session_interest": {"Ladieswear": 3, "Menswear": 3, "Divided": 1},
+        },
+    ),
+    (
+        ("여친", "여자친구만날", "여자친구 만날", "여자친구 보러", "여자친구랑", "남친", "남자친구 만날"),
+        {
+            "intent_label": "연인 만나는 날 단정한 캐주얼룩",
+            "preferred_terms": (
+                "shirt", "knit", "sweater", "cardigan", "trousers", "slacks",
+                "clean", "minimal", "smart casual", "loafers", "jacket",
+            ),
+            "avoid_terms": ("sweatpants", "joggers", "training pants", "lingerie", "baby", "formal suit"),
+            "session_interest": {"Menswear": 3, "Ladieswear": 2, "Divided": 1},
+        },
+    ),
+    (
+        ("도서관", "공부", "스터디", "팀플", "과제", "library", "study"),
+        {
+            "intent_label": "도서관/스터디 깔끔한 데일리룩",
+            "preferred_terms": (
+                "cardigan", "knit", "sweater", "shirt", "t-shirt", "trousers",
+                "jeans", "comfortable casual", "minimal", "clean", "sneakers",
+            ),
+            "avoid_terms": ("party", "heels", "lingerie", "baby", "swimwear", "formal suit"),
+            "session_interest": {"Divided": 2, "Ladieswear": 1, "Menswear": 1},
+        },
+    ),
+    (
+        ("카페", "브런치", "친구랑", "친구들과", "약속", "cafe", "brunch"),
+        {
+            "intent_label": "카페/친구 약속 캐주얼룩",
+            "preferred_terms": (
+                "cardigan", "shirt", "blouse", "knit", "sweater", "jeans",
+                "trousers", "clean", "casual", "sneakers",
+            ),
+            "avoid_terms": ("lingerie", "baby", "swimwear", "training pants"),
+            "session_interest": {"Divided": 2, "Ladieswear": 2, "Menswear": 1},
+        },
+    ),
+    (
+        ("출근", "회사", "오피스", "회의", "면접", "인턴", "office", "work", "interview"),
+        {
+            "intent_label": "출근/면접 단정한 오피스룩",
+            "preferred_terms": (
+                "shirt", "blouse", "blazer", "jacket", "trousers", "slacks",
+                "skirt", "coat", "clean", "minimal", "formal",
+            ),
+            "avoid_terms": ("hoodie", "sweatpants", "joggers", "training pants", "lingerie", "baby", "swimwear"),
+            "session_interest": {"Ladieswear": 3, "Menswear": 3},
+        },
+    ),
+    (
+        ("비오는", "비 오는", "비올때", "비 올때", "장마", "rain", "rainy"),
+        {
+            "intent_label": "비 오는 날 실용 캐주얼룩",
+            "preferred_terms": (
+                "jacket", "coat", "parka", "hooded", "dark", "trousers",
+                "boots", "sneakers", "waterproof", "practical",
+            ),
+            "avoid_terms": ("white trousers", "heels", "sandals", "suede", "lingerie", "baby"),
+            "session_interest": {"Divided": 2, "Menswear": 1, "Ladieswear": 1},
+        },
+    ),
+    (
+        ("여행", "공항", "기차", "버스", "장거리", "travel", "airport"),
+        {
+            "intent_label": "여행/이동 편한 캐주얼룩",
+            "preferred_terms": (
+                "comfortable casual", "relaxed fit", "hoodie", "sweatshirt",
+                "joggers", "trousers", "t-shirt", "sneakers", "jacket",
+            ),
+            "avoid_terms": ("heels", "formal suit", "lingerie", "baby"),
+            "session_interest": {"Divided": 2, "Sport": 1},
+        },
+    ),
+    (
+        ("운동", "헬스", "러닝", "산책", "조깅", "workout", "running", "gym"),
+        {
+            "intent_label": "운동/산책 스포티룩",
+            "preferred_terms": (
+                "sportswear", "training", "leggings", "t-shirt", "tank top",
+                "sneakers", "joggers", "sweatshirt", "functional",
+            ),
+            "avoid_terms": ("dress", "skirt", "blouse", "heels", "formal", "lingerie", "baby"),
+            "session_interest": {"Sport": 3, "Divided": 1},
+        },
+    ),
+)
+
+
+def _normalize_term_list(value: object, limit: int) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in value:
+        term = str(raw_term).strip()
+        normalized = term.lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(term)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _merge_search_interest(*interests: object) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for interest in interests:
+        if not isinstance(interest, dict):
+            continue
+        parsed = _parse_query_interest_payload({"interest": interest})
+        for category, score in parsed.items():
+            merged[category] = max(merged.get(category, 0), score)
+    return merged
+
+
+def _fallback_search_intent(query: str | None, translated_query: str | None = None) -> dict[str, object]:
+    normalized_query = " ".join((query or "").split())
+    lowered = normalized_query.lower()
+    preferred_terms: list[str] = []
+    avoid_terms: list[str] = []
+    session_interests: list[dict[str, int]] = []
+    intent_label = "패션 검색"
+
+    for keywords, intent in SITUATIONAL_SEARCH_INTENTS:
+        if any(keyword in lowered or keyword in normalized_query for keyword in keywords):
+            intent_label = str(intent.get("intent_label") or intent_label)
+            preferred_terms.extend(_normalize_term_list(intent.get("preferred_terms"), SEARCH_INTENT_TERM_LIMIT))
+            avoid_terms.extend(_normalize_term_list(intent.get("avoid_terms"), SEARCH_INTENT_AVOID_LIMIT))
+            raw_interest = intent.get("session_interest", {})
+            if isinstance(raw_interest, dict):
+                session_interests.append(raw_interest)
+
+    fallback_interest = _infer_session_interest_from_query_keywords(normalized_query)
+    session_interest = _merge_search_interest(*session_interests, fallback_interest)
+    base_query = (translated_query or normalized_query).strip()
+    if preferred_terms:
+        search_query = f"{base_query}. Keywords: {' '.join(dict.fromkeys(preferred_terms))}"
+    else:
+        search_query = base_query
+
+    return {
+        "intent_label": intent_label,
+        "translated_query": translated_query or (base_query if base_query != normalized_query else None),
+        "search_query": search_query,
+        "preferred_terms": _normalize_term_list(preferred_terms, SEARCH_INTENT_TERM_LIMIT),
+        "avoid_terms": _normalize_term_list(avoid_terms, SEARCH_INTENT_AVOID_LIMIT),
+        "session_interest": session_interest,
+        "source": "fallback",
+    }
+
+
+def _parse_search_intent_payload(payload: object, query: str) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return _fallback_search_intent(query)
+
+    preferred_terms = _normalize_term_list(payload.get("preferred_terms"), SEARCH_INTENT_TERM_LIMIT)
+    avoid_terms = _normalize_term_list(payload.get("avoid_terms"), SEARCH_INTENT_AVOID_LIMIT)
+    translated_query = str(payload.get("translated_query") or "").strip() or None
+    raw_search_query = str(payload.get("search_query") or "").strip()
+    if not raw_search_query:
+        raw_search_query = translated_query or query
+    if preferred_terms and "keywords:" not in raw_search_query.lower():
+        raw_search_query = f"{raw_search_query}. Keywords: {' '.join(preferred_terms)}"
+
+    fallback = _fallback_search_intent(query, translated_query=translated_query)
+    session_interest = _merge_search_interest(payload.get("session_interest"), fallback.get("session_interest"))
+    return {
+        "intent_label": str(payload.get("intent_label") or fallback.get("intent_label") or "패션 검색").strip(),
+        "translated_query": translated_query,
+        "search_query": raw_search_query,
+        "preferred_terms": preferred_terms or fallback.get("preferred_terms", []),
+        "avoid_terms": avoid_terms or fallback.get("avoid_terms", []),
+        "session_interest": session_interest,
+        "source": "llm",
+    }
+
+
+async def _infer_search_intent(query: str | None) -> dict[str, object]:
+    normalized_query = " ".join((query or "").split())
+    if not normalized_query:
+        return _fallback_search_intent(query)
+
+    if not GEMINI_API_KEY:
+        return _fallback_search_intent(normalized_query)
+
+    prompt = (
+        "You are a fashion search intent parser for an H&M-like product catalog.\n"
+        "Convert the user's natural-language fashion query into retrieval-friendly English.\n"
+        "Prefer concrete product terms that exist in apparel catalogs. For situational Korean queries, infer the outfit context.\n"
+        "Example: '피방갈때 입을 옷' means comfortable casual PC cafe/gaming outfit, usually hoodie, sweatshirt, joggers, sweatpants, sneakers, t-shirt.\n"
+        "Return only JSON with these keys:\n"
+        "- translated_query: concise English translation\n"
+        "- search_query: English query for vector search, including concrete product/style words\n"
+        "- preferred_terms: up to 12 product/style terms to boost\n"
+        "- avoid_terms: up to 10 terms to demote if they conflict with the situation\n"
+        "- intent_label: short Korean label for UI/debug\n"
+        "- session_interest: scores 0-3 using only Ladieswear, Menswear, Divided, Sport, Kids, Lingeries/Tights\n\n"
+        f"User query: {normalized_query}\n"
+    )
+    try:
+        llm_text = await _call_gemini(prompt, json_mode=True)
+        parsed = json.loads(llm_text)
+        return _parse_search_intent_payload(parsed, normalized_query)
+    except Exception:
+        translated = await _translate_to_english(normalized_query) if _has_korean(normalized_query) else normalized_query
+        return _fallback_search_intent(normalized_query, translated_query=translated)
+
+
+def _text_for_intent_match(item: dict) -> str:
+    fields = (
+        item.get("name"),
+        item.get("brand"),
+        item.get("category"),
+        item.get("color"),
+        item.get("product_type"),
+        item.get("main_category"),
+        item.get("product_group"),
+    )
+    return " ".join(str(field or "") for field in fields).lower()
+
+
+def _apply_search_intent_preferences(items: list[dict], intent: dict[str, object]) -> list[dict]:
+    preferred_terms = [term.lower() for term in _normalize_term_list(intent.get("preferred_terms"), SEARCH_INTENT_TERM_LIMIT)]
+    avoid_terms = [term.lower() for term in _normalize_term_list(intent.get("avoid_terms"), SEARCH_INTENT_AVOID_LIMIT)]
+    if not preferred_terms and not avoid_terms:
+        return items
+
+    adjusted: list[dict] = []
+    for position, item in enumerate(items):
+        text = _text_for_intent_match(item)
+        preferred_hits = sum(1 for term in preferred_terms if term in text)
+        avoid_hits = sum(1 for term in avoid_terms if term in text)
+        intent_boost = (0.04 * preferred_hits) - (0.07 * avoid_hits)
+        ranked_item = {**item}
+        ranked_item["intent_boost"] = round(intent_boost, 4)
+        ranked_item["_intent_rank_score"] = float(item.get("score", item.get("similarity", 0.0)) or 0.0) + intent_boost
+        ranked_item["_original_position"] = position
+        adjusted.append(ranked_item)
+
+    adjusted.sort(key=lambda item: (item["_intent_rank_score"], -item["_original_position"]), reverse=True)
+    for item in adjusted:
+        item.pop("_intent_rank_score", None)
+        item.pop("_original_position", None)
+    return adjusted
+
+
+RECOMMENDATION_REASON_FALLBACK_PREFIX = "Gemini 토큰 한도 제한으로 기본 추천 근거를 표시합니다."
+MODEL_REASON_LABELS = {
+    "cold_start_popularity": "아직 클릭 데이터가 적어서 비슷한 사용자들에게 반응이 좋았던 인기 상품을 우선 추천했습니다.",
+    "session_interest_match": "방금 설정한 관심사와 상품 카테고리가 잘 맞아서 추천했습니다.",
+    "recent_click_similarity": "최근 클릭한 상품과 스타일이나 카테고리가 가까워서 함께 보기 좋은 후보입니다.",
+    "ranking_score": "페르소나, 세션 관심사, 상품 특성을 종합했을 때 점수가 높게 나온 상품입니다.",
+    "new_item_boost": "새로운 후보도 탐색할 수 있도록 노출한 상품입니다.",
+    "bandit_reward_exploration": "최근 사용자 반응이 좋아지고 있어 탐색 후보로 함께 추천했습니다.",
+}
+
+
+def _fallback_recommendation_reason(item: dict, *, limited: bool = True) -> str:
+    reason_key = str(item.get("reason") or "")
+    base_reason = MODEL_REASON_LABELS.get(
+        reason_key,
+        "추천 모델이 사용자 맥락과 상품 특성을 종합해 후보로 선택한 상품입니다.",
+    )
+    category = str(item.get("category") or item.get("product_type") or "").strip()
+    color = str(item.get("color") or "").strip()
+    detail_parts = []
+    if color:
+        detail_parts.append(f"{color} 컬러")
+    if category:
+        detail_parts.append(f"{category} 상품")
+    detail = ""
+    if detail_parts:
+        detail = f" {' '.join(detail_parts)}이라 현재 코디 후보로 활용하기 좋습니다."
+    prefix = f"{RECOMMENDATION_REASON_FALLBACK_PREFIX} " if limited else ""
+    return f"{prefix}{base_reason}{detail}"
+
+
 def _enrich_search_results(items: list[dict]) -> list[dict]:
     enriched_results = []
     for item in items:
         pid = str(item.get("product_id", ""))
         meta = article_meta.get(pid, {})
+        price, price_estimated = _display_price(meta, item)
         enriched_results.append({
             **item,
             "name": meta.get("name") or item.get("name") or pid,
             "brand": meta.get("brand") or "H&M",
             "category": meta.get("category", item.get("category", "")),
+            "main_category": meta.get("main_category", ""),
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
-            "price": meta.get("price", 0),
+            "price": price,
+            "price_estimated": price_estimated,
             "image_url": image_url_for_article(pid),
         })
     return enriched_results
@@ -400,15 +1198,18 @@ def _enrich_recommendation_results(items: list[dict]) -> list[dict]:
     for rank, item in enumerate(items, 1):
         pid = str(item.get("product_id", ""))
         meta = article_meta.get(pid, {})
+        price, price_estimated = _display_price(meta, item)
         enriched_results.append({
             **item,
             "rank": rank,
             "name": meta.get("name") or pid,
             "brand": meta.get("brand") or "H&M",
             "category": meta.get("category", ""),
+            "main_category": meta.get("main_category", ""),
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
-            "price": meta.get("price", 0),
+            "price": price,
+            "price_estimated": price_estimated,
             "image_url": image_url_for_article(pid),
         })
     return enriched_results
@@ -424,15 +1225,20 @@ def _top_persona_from_scores(persona_scores: dict[str, int] | None) -> str | Non
 async def search(req: SearchRequest):
     """search-engine으로 검색 요청을 프록시한다.
 
-    한국어 텍스트 쿼리는 Gemini로 영어로 번역 후 CLIP에 전달한다.
+    텍스트 쿼리는 Gemini/fallback으로 검색 의도를 확장한 뒤 CLIP에 전달한다.
     결과에 name/category/color/price enrichment를 적용한다.
     """
-    translated_query: str | None = None
+    requested_top_k = max(1, int(req.top_k))
     search_payload = req.model_dump()
+    search_intent: dict[str, object] | None = None
+    search_constraints: dict[str, set[str]] | None = None
 
-    if req.query and _has_korean(req.query) and GEMINI_API_KEY:
-        translated_query = await _translate_to_english(req.query)
-        search_payload["query"] = translated_query
+    if req.query:
+        search_intent = await _infer_search_intent(req.query)
+        search_payload["query"] = search_intent.get("search_query") or req.query
+        search_constraints = _derive_query_constraints(req.query, search_intent.get("translated_query"))
+        if search_constraints["products"] or search_constraints["colors"]:
+            search_payload["top_k"] = max(requested_top_k, SEARCH_INTENT_CANDIDATE_POOL)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
@@ -445,16 +1251,36 @@ async def search(req: SearchRequest):
 
     result = resp.json()
 
-    result["results"] = _enrich_search_results(result.get("results", []))
+    enriched_results = _enrich_search_results(result.get("results", []))
+    if search_intent:
+        enriched_results = _apply_search_intent_preferences(enriched_results, search_intent)
+        enriched_results = _prioritize_query_constraint_matches(
+            enriched_results,
+            search_constraints or _derive_query_constraints(req.query, search_intent.get("translated_query")),
+        )
+        enriched_results = _apply_query_product_labels(
+            enriched_results,
+            search_constraints or _derive_query_constraints(req.query, search_intent.get("translated_query")),
+        )
+    result["results"] = enriched_results[:requested_top_k]
+    result["total_count"] = len(result["results"])
 
-    if translated_query:
+    if search_intent:
         result["original_query"] = req.query
-        result["translated_query"] = translated_query
+        result["translated_query"] = search_intent.get("translated_query")
+        result["expanded_query"] = search_intent.get("search_query")
+        result["search_intent"] = {
+            "intent_label": search_intent.get("intent_label"),
+            "preferred_terms": search_intent.get("preferred_terms", []),
+            "avoid_terms": search_intent.get("avoid_terms", []),
+            "source": search_intent.get("source"),
+        }
 
     return result
 
 
-PERSONALIZED_SEARCH_CANDIDATE_POOL = 80
+SEARCH_INTENT_CANDIDATE_POOL = 150
+PERSONALIZED_SEARCH_CANDIDATE_POOL = 150
 
 
 @app.post("/api/personalized-search")
@@ -462,17 +1288,26 @@ async def personalized_search(req: PersonalizedSearchRequest):
     """Search broadly, then return both similarity order and personalized order."""
 
     top_n = max(1, min(int(req.top_n), 100))
+    target_audience = _normalize_target_audience(req.target_audience)
     search_top_k = max(top_n, int(req.top_k), PERSONALIZED_SEARCH_CANDIDATE_POOL)
-    translated_query: str | None = None
+    search_intent = await _infer_search_intent(req.query) if req.query else None
+    translated_query = (
+        str(search_intent.get("translated_query") or "").strip() or None
+        if search_intent
+        else None
+    )
+    search_constraints = (
+        _derive_query_constraints(req.query, search_intent.get("translated_query"))
+        if search_intent
+        else {"colors": set(), "products": set()}
+    )
+    if search_constraints["products"] or search_constraints["colors"]:
+        search_top_k = max(search_top_k, SEARCH_INTENT_CANDIDATE_POOL)
     search_payload = {
-        "query": req.query,
+        "query": search_intent.get("search_query") if search_intent else req.query,
         "image_base64": req.image_base64,
         "top_k": search_top_k,
     }
-
-    if req.query and _has_korean(req.query) and GEMINI_API_KEY:
-        translated_query = await _translate_to_english(req.query)
-        search_payload["query"] = translated_query
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
@@ -485,8 +1320,29 @@ async def personalized_search(req: PersonalizedSearchRequest):
 
     search_result = search_resp.json()
     enriched_search_results = _enrich_search_results(search_result.get("results", []))
+    if search_intent:
+        enriched_search_results = _apply_search_intent_preferences(enriched_search_results, search_intent)
+        enriched_search_results = _prioritize_query_constraint_matches(
+            enriched_search_results,
+            search_constraints,
+        )
+        enriched_search_results = _apply_query_product_labels(enriched_search_results, search_constraints)
+    enriched_search_results = _apply_target_audience_filter(
+        enriched_search_results,
+        target_audience,
+        min_results=top_n,
+    )
+    rerank_search_results = enriched_search_results
+    explicit_matches = _query_constraint_matches(enriched_search_results, search_constraints)
+    if len(explicit_matches) >= top_n:
+        rerank_search_results = explicit_matches
 
-    inferred_interest = await _infer_session_interest_from_query(req.query)
+    inferred_interest = (
+        _merge_search_interest(search_intent.get("session_interest")) if search_intent else {}
+    ) or await _infer_session_interest_from_query(req.query)
+    target_interest = _target_audience_interest(target_audience)
+    if target_interest:
+        inferred_interest[target_interest] = max(inferred_interest.get(target_interest, 0), 10)
     if inferred_interest:
         interest = feature_store.get_session_interest(req.user_id)
         for category, score in inferred_interest.items():
@@ -506,15 +1362,18 @@ async def personalized_search(req: PersonalizedSearchRequest):
                 "product_id": str(item.get("product_id", "")),
                 "score": item.get("score", item.get("similarity")),
             }
-            for item in enriched_search_results
+            for item in rerank_search_results
             if item.get("product_id") is not None
         ],
         "recent_clicks": features["recent_clicks"],
         "session_interest": features["session_interest"] or None,
         "persona_hint": persona_hint,
         "persona_scores": persona_scores or None,
+        "preferred_terms": search_intent.get("preferred_terms", []) if search_intent else [],
+        "avoid_terms": search_intent.get("avoid_terms", []) if search_intent else [],
         "include_recommendation_candidates": False,
-        "recommendation_candidate_pool_size": PERSONALIZED_SEARCH_CANDIDATE_POOL,
+        "recommendation_candidate_pool_size": len(rerank_search_results) or PERSONALIZED_SEARCH_CANDIDATE_POOL,
+        "personalization_weight": req.personalization_weight,
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -527,7 +1386,15 @@ async def personalized_search(req: PersonalizedSearchRequest):
             raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
 
     personalized_result = rerank_resp.json()
-    personalized_results = _enrich_recommendation_results(personalized_result.get("recommendations", []))
+    raw_personalized_results = _enrich_recommendation_results(personalized_result.get("recommendations", []))
+    personalized_results = _blend_personalized_with_search_intent(
+        rerank_search_results,
+        raw_personalized_results,
+        query=req.query,
+        translated_query=translated_query,
+        top_n=top_n,
+        personalization_weight=req.personalization_weight,
+    )
     pipeline_latency = personalized_result.get("pipeline_latency", {})
 
     response = {
@@ -539,10 +1406,20 @@ async def personalized_search(req: PersonalizedSearchRequest):
         "session_interest": features["session_interest"],
         "persona": personalized_result.get("persona", persona_hint or "personalized"),
         "persona_scores": persona_scores,
+        "target_audience": target_audience,
+        "candidate_pool_size": len(rerank_search_results),
+        "explicit_candidate_count": len(explicit_matches),
     }
-    if translated_query:
+    if search_intent:
         response["original_query"] = req.query
-        response["translated_query"] = translated_query
+        response["translated_query"] = search_intent.get("translated_query")
+        response["expanded_query"] = search_intent.get("search_query")
+        response["search_intent"] = {
+            "intent_label": search_intent.get("intent_label"),
+            "preferred_terms": search_intent.get("preferred_terms", []),
+            "avoid_terms": search_intent.get("avoid_terms", []),
+            "source": search_intent.get("source"),
+        }
     return response
 
 
@@ -562,6 +1439,7 @@ async def recommend(
     user_id: str = Query(...),
     top_n: int = Query(10),
     persona_hint: str | None = Query(None),
+    query_text: str | None = Query(None),
     personalization_weight: float | None = Query(None, ge=0.0, le=5.0),
     price_weight: float | None = Query(None, ge=0.0, le=5.0),
     popularity_weight: float | None = Query(None, ge=0.0, le=5.0),
@@ -576,6 +1454,34 @@ async def recommend(
     click_count = features["click_count"]
     raw_persona_scores = features.get("persona_scores", {})
     persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
+    normalized_query_text = " ".join((query_text or "").split()) or None
+    query_search_intent: dict[str, object] | None = None
+    effective_session_interest = dict(features["session_interest"] or {})
+
+    if normalized_query_text:
+        query_search_intent = await _infer_search_intent(normalized_query_text)
+        intent_interest = _merge_search_interest(query_search_intent.get("session_interest"))
+        updated_interest = False
+        for category, score in intent_interest.items():
+            serving_score = float(score) * QUERY_RECOMMEND_INTEREST_MULTIPLIER
+            current_score = float(effective_session_interest.get(category, 0.0) or 0.0)
+            if serving_score > current_score:
+                effective_session_interest[category] = serving_score
+                updated_interest = True
+        if updated_interest:
+            feature_store.set_session_interest(user_id, effective_session_interest)
+            feature_store.invalidate_recommendation_cache(user_id)
+
+    preferred_terms = (
+        _normalize_term_list(query_search_intent.get("preferred_terms"), SEARCH_INTENT_TERM_LIMIT)
+        if query_search_intent
+        else []
+    )
+    avoid_terms = (
+        _normalize_term_list(query_search_intent.get("avoid_terms"), SEARCH_INTENT_AVOID_LIMIT)
+        if query_search_intent
+        else []
+    )
     weight_params = {
         "persona_hint": persona_hint,
         "persona_scores": persona_scores or None,
@@ -587,10 +1493,16 @@ async def recommend(
         "exploration_weight": exploration_weight,
         "long_tail_weight": long_tail_weight,
     }
+    cache_params = {
+        **weight_params,
+        "query_text": normalized_query_text,
+        "preferred_terms": preferred_terms or None,
+        "avoid_terms": avoid_terms or None,
+    }
 
     # 캐시 키: include_reasons 여부에 따라 별도 키 사용
     reasons_suffix = ":reasons" if include_reasons else ""
-    cache_key = f"cache:recommend:{user_id}:{top_n}:{click_count}{_weight_cache_suffix(weight_params)}{reasons_suffix}"
+    cache_key = f"cache:recommend:{user_id}:{top_n}:{click_count}{_weight_cache_suffix(cache_params)}{reasons_suffix}"
     cached = feature_store.r.get(cache_key)
     if cached:
         return json.loads(cached)
@@ -600,9 +1512,13 @@ async def recommend(
         "top_n": top_n,
         "recent_clicks": ",".join(features["recent_clicks"]),
         "click_count": click_count,
-        "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
+        "session_interest": json.dumps(effective_session_interest) if effective_session_interest else None,
         "persona_scores": json.dumps(persona_scores) if persona_scores else None,
     }
+    if preferred_terms:
+        params["preferred_terms"] = json.dumps(preferred_terms, ensure_ascii=False)
+    if avoid_terms:
+        params["avoid_terms"] = json.dumps(avoid_terms, ensure_ascii=False)
     params.update({
         key: value
         for key, value in weight_params.items()
@@ -619,6 +1535,20 @@ async def recommend(
             raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
 
     result = resp.json()
+    if query_search_intent:
+        result["original_query"] = normalized_query_text
+        result["translated_query"] = query_search_intent.get("translated_query")
+        result["expanded_query"] = query_search_intent.get("search_query")
+        result["search_intent"] = {
+            "intent_label": query_search_intent.get("intent_label"),
+            "preferred_terms": query_search_intent.get("preferred_terms", []),
+            "avoid_terms": query_search_intent.get("avoid_terms", []),
+            "source": query_search_intent.get("source"),
+        }
+        result["query_session_interest"] = {
+            category: effective_session_interest.get(category)
+            for category in _merge_search_interest(query_search_intent.get("session_interest"))
+        }
 
     # pipeline_latency 중첩 구조를 최상위로 풀어서 프론트가 바로 쓸 수 있게 함
     pl = result.pop("pipeline_latency", {})
@@ -629,20 +1559,24 @@ async def recommend(
     for i, item in enumerate(result.get("recommendations", []), 1):
         pid = str(item.get("product_id", ""))
         meta = article_meta.get(pid, {})
+        price, price_estimated = _display_price(meta, item)
         enriched.append({
             **item,
             "rank": i,
             "name": meta.get("name") or pid,
             "brand": meta.get("brand") or "H&M",
             "category": meta.get("category", ""),
+            "main_category": meta.get("main_category", ""),
             "color": meta.get("color", ""),
             "product_type": meta.get("product_type", ""),
-            "price": meta.get("price", 0),
+            "price": price,
+            "price_estimated": price_estimated,
             "image_url": image_url_for_article(pid),
         })
     result["recommendations"] = enriched
 
     # B: LLM 추천 이유 생성 (include_reasons=True이고 API 키 있을 때만)
+    reasons_generated = False
     if include_reasons and GEMINI_API_KEY:
         items_desc = "\n".join(
             f"{item['rank']}. {item['name']} ({item['category']}, {item['color']}, score={item.get('score', 0):.3f})"
@@ -659,11 +1593,95 @@ async def recommend(
             reasons = json.loads(llm_text).get("reasons", [])
             for i, item in enumerate(result["recommendations"]):
                 item["reason_text"] = reasons[i] if i < len(reasons) else ""
+                item["reason_source"] = "gemini" if item["reason_text"] else "model"
+            reasons_generated = any(item.get("reason_text") for item in result["recommendations"])
         except Exception:
-            pass  # LLM 실패해도 추천 결과는 정상 반환
+            logging.exception("Gemini recommendation reasons failed. Using fallback reason_text.")
+
+    if include_reasons and not reasons_generated:
+        for item in result["recommendations"]:
+            item["reason_text"] = _fallback_recommendation_reason(item, limited=True)
+            item["reason_source"] = "fallback_token_limit"
 
     feature_store.r.set(cache_key, json.dumps(result), ex=RECOMMEND_CACHE_TTL)
     return result
+
+
+@app.post("/api/explain-results")
+async def explain_results(req: ExplainResultsRequest):
+    """Generate AI reasons for the results already shown on the search page."""
+
+    if not req.items:
+        raise HTTPException(status_code=400, detail="설명할 검색 결과가 없습니다.")
+
+    limited_items = req.items[:10]
+    enriched_items = []
+    for index, item in enumerate(limited_items, 1):
+        normalized_id = str(item.id).strip()
+        if normalized_id.isdigit():
+            normalized_id = normalized_id.zfill(10)
+        meta = article_meta.get(normalized_id, {})
+        price, price_estimated = _display_price(meta, item.model_dump())
+        enriched_items.append({
+            "id": item.id,
+            "rank": index,
+            "name": meta.get("name") or item.title or normalized_id,
+            "brand": meta.get("brand") or item.brand or "H&M",
+            "category": meta.get("category", ""),
+            "main_category": meta.get("main_category", ""),
+            "color": meta.get("color", ""),
+            "product_type": meta.get("product_type", ""),
+            "price": price,
+            "price_estimated": price_estimated,
+        })
+
+    if GEMINI_API_KEY:
+        items_desc = "\n".join(
+            f"{item['rank']}. id={item['id']} | {item['name']} | "
+            f"{item['category']} / {item['product_type']} / {item['color']} | {item['brand']}"
+            for item in enriched_items
+        )
+        prompt = (
+            "현재 화면에 표시된 패션 검색 결과 각각에 대해 추천 이유를 한국어로 작성하세요.\n"
+            "각 이유는 2문장으로 작성하고, 너무 일반적인 'A가 B와 매칭' 식 표현은 피하세요.\n"
+            "반드시 상품의 카테고리, 색상, 가격대, 검색어 의도, 페르소나/쇼핑 대상을 연결해 설명하세요.\n"
+            "새 상품을 만들거나 순서를 바꾸지 말고, 입력된 상품 수와 같은 개수의 reasons 배열만 반환하세요.\n\n"
+            f"검색어: {req.query or '없음'}\n"
+            f"페르소나: {req.persona or '개인화'}\n\n"
+            f"쇼핑 대상: {_normalize_target_audience(req.target_audience)}\n\n"
+            f"상품 목록:\n{items_desc}\n\n"
+            'JSON 형식: {"reasons":["이유1","이유2"]}'
+        )
+        try:
+            llm_text = await _call_gemini(prompt, json_mode=True)
+            reasons = json.loads(llm_text).get("reasons", [])
+        except Exception:
+            reasons = []
+    else:
+        reasons = []
+
+    explanations = []
+    for index, item in enumerate(enriched_items):
+        category = item["category"] or item["product_type"] or "상품"
+        color = item["color"] or "기본 색상"
+        price_label = f"{int(item['price']):,}원대"
+        estimated_note = "추정 가격 기준으로도 " if item.get("price_estimated") else ""
+        target_label = {
+            "all": "전체 고객",
+            "women": "여성 고객",
+            "men": "남성 고객",
+            "kids": "키즈 고객",
+        }.get(_normalize_target_audience(req.target_audience), "전체 고객")
+        fallback = (
+            f"{item['name']}은 {color} 계열의 {category}라서 '{req.query or '현재 검색'}'에서 보인 색상과 품목 의도에 직접 맞습니다. "
+            f"{estimated_note}{price_label}로 예산형 조합에 넣기 쉽고, {target_label} 기준의 현재 페르소나 선호와도 무난하게 연결됩니다."
+        )
+        explanations.append({
+            "id": item["id"],
+            "reason": reasons[index] if index < len(reasons) and reasons[index] else fallback,
+        })
+
+    return {"items": explanations}
 
 
 @app.post("/api/events")
@@ -725,12 +1743,14 @@ async def onboarding(req: OnboardingRequest):
     """
     style_text = ", ".join(req.style_choices) if req.style_choices else "없음"
     budget_text = {"low": "저가", "mid": "중간 가격대", "high": "고가"}.get(req.budget_range or "", "무관")
+    target_audience = _normalize_target_audience(req.target_audience)
 
     prompt = (
         f"사용자가 아래와 같이 패션 취향을 설명했습니다.\n\n"
         f"자유 입력: {req.description}\n"
         f"선호 스타일: {style_text}\n"
-        f"예산 범위: {budget_text}\n\n"
+        f"예산 범위: {budget_text}\n"
+        f"쇼핑 대상: {target_audience}\n\n"
         f"아래 9개 패션 페르소나 중 이 사용자에게 해당하는 것을 골라 퍼센티지를 배분해주세요.\n\n"
         f"규칙 — 먼저 입력에서 페르소나와 연결되는 신호가 몇 개인지 파악하세요:\n"
         f"[신호 1개] 예: '파란색만 좋아', '할인 상품만 산다'\n"
@@ -757,7 +1777,7 @@ async def onboarding(req: OnboardingRequest):
     )
 
     # 같은 입력이면 캐시에서 바로 반환 (불필요한 Gemini 재호출 방지)
-    cache_input = f"{req.description.strip().lower()}|{'|'.join(sorted(req.style_choices))}|{req.budget_range or ''}"
+    cache_input = f"{req.description.strip().lower()}|{'|'.join(sorted(req.style_choices))}|{req.budget_range or ''}|{target_audience}"
     onboarding_cache_key = f"cache:onboarding:{hashlib.sha256(cache_input.encode('utf-8')).hexdigest()}"
     cached = feature_store.r.get(onboarding_cache_key)
     if cached:
@@ -789,6 +1809,7 @@ class PersonaSelectRequest(BaseModel):
     user_id: str
     persona: str  # 9개 중 유저가 선택한 페르소나
     persona_scores: dict[str, int | float] | None = None
+    target_audience: str | None = None
 
 
 @app.post("/api/onboarding/select")
@@ -836,6 +1857,9 @@ async def onboarding_select(req: PersonaSelectRequest):
     session_interest = {key: round(value) for key, value in blended.items() if round(value) > 0}
     if not session_interest:
         session_interest = persona_to_interest[req.persona]
+    target_interest = _target_audience_interest(req.target_audience)
+    if target_interest:
+        session_interest[target_interest] = max(session_interest.get(target_interest, 0), 10)
 
     feature_store.set_persona_scores(req.user_id, stored_scores)
     feature_store.r.delete(f"onboarding_scores:{req.user_id}")
@@ -854,6 +1878,8 @@ async def budget_set(
     user_id: str = Query(...),
     budget: int = Query(..., description="총 예산 (원)"),
     set_count: int = Query(3, description="구성할 세트 수"),
+    query: str | None = Query(None, description="현재 검색어"),
+    target_audience: str | None = Query(None, description="all | women | men | kids"),
 ):
     """D: 예산 기반 패션 세트 추천.
 
@@ -864,23 +1890,112 @@ async def budget_set(
     features = feature_store.get_user_features(user_id)
     raw_persona_scores = features.get("persona_scores", {})
     persona_scores = _normalize_persona_scores(raw_persona_scores) if raw_persona_scores else {}
-    params = {
-        "user_id": user_id,
-        "top_n": 50,
-        "recent_clicks": ",".join(features["recent_clicks"]),
-        "click_count": features["click_count"],
-        "session_interest": json.dumps(features["session_interest"]) if features["session_interest"] else None,
-        "persona_scores": json.dumps(persona_scores) if persona_scores else None,
-    }
+    session_interest = dict(features["session_interest"]) if features["session_interest"] else {}
+    target_audience = _normalize_target_audience(target_audience)
+    target_interest = _target_audience_interest(target_audience)
+    if target_interest:
+        session_interest[target_interest] = max(session_interest.get(target_interest, 0), 10)
+    inferred_interest = await _infer_session_interest_from_query(query)
+    if inferred_interest:
+        for category, score in inferred_interest.items():
+            session_interest[category] = session_interest.get(category, 0) + score
 
+    candidates: list[dict] = []
+    anchor_candidates: list[dict] = []
+    complement_candidates: list[dict] = []
+    query_constraints = _derive_query_constraints(query)
     async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            rec_resp = await client.get(f"{REC_URL}/recommend", params=params)
-            rec_resp.raise_for_status()
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
+        if query and query.strip():
+            translated_query: str | None = None
+            search_query = query.strip()
+            if _has_korean(search_query) and GEMINI_API_KEY:
+                translated_query = await _translate_to_english(search_query)
+                search_query = translated_query
 
-    candidates = rec_resp.json().get("recommendations", [])
+            try:
+                search_resp = await client.post(
+                    f"{SEARCH_URL}/search",
+                    json={"query": search_query, "top_k": SEARCH_INTENT_CANDIDATE_POOL},
+                )
+                search_resp.raise_for_status()
+                search_results = _enrich_search_results(search_resp.json().get("results", []))
+                search_results = _apply_target_audience_filter(search_results, target_audience, min_results=6)
+                constraints = _derive_query_constraints(query, translated_query)
+                query_constraints = constraints
+                search_results = _apply_query_product_labels(search_results, constraints)
+                constrained_results = [
+                    item for item in search_results if _item_matches_query_constraints(item, constraints)
+                ]
+                product_results = [
+                    item for item in search_results if _item_matches_query_product(item, constraints)
+                ]
+                color_results = [
+                    item for item in search_results if _item_matches_query_color(item, constraints)
+                ]
+                anchor_candidates = constrained_results or product_results or color_results[:10] or search_results[:10]
+
+                complement_groups = _complement_groups_for_constraints(constraints)
+                complement_candidates = [
+                    item
+                    for item in search_results
+                    if item not in anchor_candidates
+                    and _item_matches_any_product_group(item, complement_groups)
+                    and _item_matches_complement_color(item, constraints["colors"])
+                ]
+                if len(complement_candidates) < 6:
+                    complement_candidates.extend(
+                        item
+                        for item in search_results
+                        if item not in anchor_candidates
+                        and item not in complement_candidates
+                        and _item_matches_any_product_group(item, complement_groups)
+                    )
+                if len(complement_candidates) < 6:
+                    complement_candidates.extend(
+                        item
+                        for item in search_results
+                        if item not in anchor_candidates and item not in complement_candidates
+                    )
+                if complement_groups:
+                    complement_candidates = sorted(
+                        complement_candidates,
+                        key=lambda item: (
+                            _product_group_priority(item, complement_groups),
+                            1 if _item_matches_complement_color(item, constraints["colors"]) else 0,
+                            float(item.get("score") or 0),
+                        ),
+                        reverse=True,
+                    )
+                candidates = anchor_candidates + complement_candidates
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=503, detail=f"search-engine 연결 실패: {e}")
+            except httpx.HTTPStatusError as e:
+                raise HTTPException(status_code=e.response.status_code, detail=str(e))
+
+        if not candidates:
+            params = {
+                "user_id": user_id,
+                "top_n": 50,
+                "recent_clicks": ",".join(features["recent_clicks"]),
+                "click_count": features["click_count"],
+                "session_interest": json.dumps(session_interest) if session_interest else None,
+                "persona_scores": json.dumps(persona_scores) if persona_scores else None,
+            }
+            try:
+                rec_resp = await client.get(f"{REC_URL}/recommend", params=params)
+                rec_resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise HTTPException(status_code=e.response.status_code, detail=str(e))
+            except httpx.RequestError as e:
+                raise HTTPException(status_code=503, detail=f"rec-models 연결 실패: {e}")
+            candidates = rec_resp.json().get("recommendations", [])
+            candidates = _apply_target_audience_filter(
+                _enrich_recommendation_results(candidates),
+                target_audience,
+                min_results=6,
+            )
+            anchor_candidates = candidates
+            complement_candidates = candidates
 
     # article_meta에서 가격 정보 보강 후 예산 내 필터
     # article_meta["price"]는 item_features CSV의 avg_price * PRICE_KRW_FACTOR (KRW)
@@ -916,7 +2031,17 @@ async def budget_set(
         except Exception:
             pass  # 미구현이면 score 기반으로만 진행
 
-    sets = _build_outfit_sets(affordable, sim_matrix, budget, set_count)
+    anchor_ids = {str(item.get("product_id", item.get("article_id", ""))) for item in anchor_candidates}
+    complement_ids = {str(item.get("product_id", item.get("article_id", ""))) for item in complement_candidates}
+    sets = _build_outfit_sets(
+        affordable,
+        sim_matrix,
+        budget,
+        set_count,
+        anchor_ids=anchor_ids,
+        complement_ids=complement_ids,
+        query_constraints=query_constraints,
+    )
     return {"sets": sets, "budget": budget, "set_count": len(sets)}
 
 
@@ -925,24 +2050,51 @@ def _build_outfit_sets(
     sim_matrix: dict,
     budget: int,
     count: int,
+    *,
+    anchor_ids: set[str] | None = None,
+    complement_ids: set[str] | None = None,
+    query_constraints: dict[str, set[str]] | None = None,
 ) -> list[list[dict]]:
-    """예산 내에서 score 기반 그리디로 n세트 조합.
+    """예산 내에서 anchor + complement 형태의 n세트 조합.
 
     sim_matrix가 있으면 아이템 간 유사도 합산 점수를 가중치로 활용한다.
     """
     sorted_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+    anchor_ids = anchor_ids or {str(item.get("article_id", "")) for item in sorted_candidates}
+    complement_ids = complement_ids or {str(item.get("article_id", "")) for item in sorted_candidates}
+    query_constraints = query_constraints or {"colors": set(), "products": set()}
+    anchors = [item for item in sorted_candidates if str(item.get("article_id", "")) in anchor_ids]
+    complements = [item for item in sorted_candidates if str(item.get("article_id", "")) in complement_ids]
+    if not complements:
+        complements = sorted_candidates
+
     sets: list[list[dict]] = []
     used_ids: set[str] = set()
 
-    for _ in range(count):
-        current_set: list[dict] = []
-        current_cost = 0
+    for anchor in anchors:
+        if len(sets) >= count:
+            break
 
-        for item in sorted_candidates:
+        anchor_id = anchor["article_id"]
+        if anchor_id in used_ids or anchor["price_int"] > budget:
+            continue
+
+        current_set: list[dict] = [anchor]
+        current_cost = anchor["price_int"]
+        used_ids.add(anchor_id)
+        used_categories = {str(anchor.get("category", "")).lower()}
+
+        for item in complements:
             aid = item["article_id"]
             if aid in used_ids:
                 continue
             if current_cost + item["price_int"] > budget:
+                continue
+            item_category = str(item.get("category", "")).lower()
+            item_product = str(item.get("product_type", "")).lower()
+            if len(current_set) < 3 and item_category in used_categories and item_product in used_categories:
+                continue
+            if _item_matches_query_constraints(item, query_constraints) and len(current_set) > 1:
                 continue
 
             # sim_matrix가 있으면 현재 세트와의 평균 유사도로 어울림 판단
@@ -958,6 +2110,8 @@ def _build_outfit_sets(
             current_set.append(item)
             current_cost += item["price_int"]
             used_ids.add(aid)
+            used_categories.add(item_category)
+            used_categories.add(item_product)
 
             if len(current_set) >= 3:
                 break

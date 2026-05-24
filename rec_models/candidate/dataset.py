@@ -41,10 +41,14 @@ except ImportError:  # pragma: no cover - torch is optional during code-only dev
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_PATH = BASE_DIR / "data" / "processed" / "candidate_train_data_dev.csv.gz"
-DEFAULT_ITEM_FEATURES_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features.csv.gz"
-DEFAULT_ITEM_FEATURES_DEV_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features_dev.csv.gz"
-DEFAULT_ITEM_FEATURES_TEST_PATH = BASE_DIR / "data" / "processed" / "candidate_item_features_test.csv.gz"
+try:
+    from rec_models.serving.paths import resolve_existing_processed_path, resolve_processed_path
+except ImportError:  # pragma: no cover - supports running from rec_models/ as cwd
+    from serving.paths import resolve_existing_processed_path, resolve_processed_path  # type: ignore[no-redef]
+
+
+DEFAULT_DATA_PATH = resolve_processed_path("CANDIDATE_TRAINING_DATA_PATH", "candidate_train_data", ".csv.gz")
+DEFAULT_ITEM_FEATURES_PATH = resolve_processed_path("CANDIDATE_ITEM_FEATURES_PATH", "candidate_item_features", ".csv.gz")
 TARGET_COLUMN = "label"
 USER_ID_COLUMN = "customer_id"
 ITEM_ID_COLUMN = "article_id"
@@ -325,10 +329,7 @@ def parse_history_item_ids(value: Any, max_items: int = DEFAULT_MAX_HISTORY_ITEM
 
 
 def _resolve_item_feature_path() -> Path | None:
-    for path in (DEFAULT_ITEM_FEATURES_DEV_PATH, DEFAULT_ITEM_FEATURES_PATH, DEFAULT_ITEM_FEATURES_TEST_PATH):
-        if path.exists():
-            return path
-    return None
+    return resolve_existing_processed_path("CANDIDATE_ITEM_FEATURES_PATH", "candidate_item_features", ".csv.gz")
 
 
 def enrich_with_item_features(

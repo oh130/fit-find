@@ -233,6 +233,9 @@ class RewardBanditStore:
         for article_id, stats in zip(normalized_ids, parsed_payloads, strict=False):
             impressions = stats["impressions"]
             reward = stats["reward"]
+            if reward <= 0.0:
+                scores[article_id] = 0.0
+                continue
             mean_reward = reward / max(impressions, 1.0)
             uncertainty = math.sqrt(log_total / (impressions + 1.0))
             scores[article_id] = mean_reward + (BANDIT_UCB_ALPHA * uncertainty)
@@ -262,4 +265,3 @@ def get_bandit_store() -> RewardBanditStore:
     if _BANDIT_STORE is None:
         _BANDIT_STORE = RewardBanditStore()
     return _BANDIT_STORE
-

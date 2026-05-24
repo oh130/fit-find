@@ -24,6 +24,8 @@ export type RecommendationBundle = {
 
 export type OnboardingPersonaScores = Record<string, number>;
 
+export type TargetAudience = "all" | "women" | "men" | "kids";
+
 export type SearchItem = {
   id: number;
   title: string;
@@ -66,6 +68,11 @@ export type BudgetSetBundle = {
   sets: BudgetSetItem[][];
 };
 
+export type ResultExplanation = {
+  id: number;
+  reason: string;
+};
+
 const recommendationFallbackPalette = [
   "linear-gradient(135deg, #3f284f 0%, #121520 100%)",
   "linear-gradient(135deg, #65513a 0%, #171a23 100%)",
@@ -90,6 +97,7 @@ type ApiRecommendationItem = {
   name?: string;
   brand?: string;
   price?: string | number;
+  price_estimated?: boolean;
   reason?: string;
   reason_text?: string;
   rank?: number;
@@ -128,6 +136,7 @@ type ApiSearchItem = {
   name?: string;
   brand?: string;
   price?: string | number;
+  price_estimated?: boolean;
   summary?: string;
   description?: string;
   score?: number;
@@ -172,6 +181,7 @@ type ApiBudgetSetItem = {
   brand?: string;
   price?: string | number;
   price_int?: number;
+  price_estimated?: boolean;
   score?: number;
   category?: string;
   image_url?: string;
@@ -245,16 +255,27 @@ async function buildApiErrorMessage(response: Response, fallback: string): Promi
   }
 }
 
-function toCurrencyLabel(value: string | number | undefined): string {
+function toCurrencyLabel(value: string | number | undefined, estimated = false): string {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return `${value.toLocaleString("ko-KR")}원`;
+    if (value <= 0) {
+      return "가격 정보 없음";
+    }
+    return `${estimated ? "추정 " : ""}${value.toLocaleString("ko-KR")}원`;
   }
 
   if (typeof value === "string" && value.trim()) {
-    return value;
+    const trimmed = value.trim();
+    if (trimmed === "0" || trimmed === "0원") {
+      return "가격 정보 없음";
+    }
+    return estimated ? `추정 ${trimmed}` : trimmed;
   }
 
   return "가격 정보 없음";
+}
+
+function cleanDisplayText(value: string | undefined, fallback: string): string {
+  return (value ?? fallback).replace(/Â·/g, "·").replace(/\s+/g, " ").trim();
 }
 
 function toLatencyLabel(value: number | string | undefined, fallback: string): string {
@@ -296,27 +317,54 @@ function toImageUrl(item: {
   return item.image_url ?? item.imageUrl ?? item.img_url ?? item.thumbnail_url ?? item.thumbnailUrl;
 }
 
+function toFiniteScore(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return fallback;
+}
+
+function toRelativeScores(rawScores: number[]): number[] {
+  if (rawScores.length === 0) {
+    return [];
+  }
+
+  const finiteScores = rawScores.map((score) => (Number.isFinite(score) ? score : 0));
+  const minScore = Math.min(...finiteScores);
+  const shiftedScores = minScore < 0 ? finiteScores.map((score) => score - minScore) : finiteScores;
+  const maxScore = Math.max(...shiftedScores);
+
+  if (maxScore <= 0) {
+    return finiteScores.map((_, index) => Math.max(0.5, 0.95 - index * 0.04));
+  }
+
+  return shiftedScores.map((score) => Math.max(0, Math.min(1, score / maxScore)));
+}
+
 function normalizeRecommendationBundle(
   payload: ApiRecommendationResponse,
   topN: number,
 ): RecommendationBundle {
-  const rawItems = payload.items ?? payload.recommendations ?? [];
+  const rawItems = (payload.items ?? payload.recommendations ?? []).slice(0, topN);
   const pipelineLatency = payload.pipeline_latency;
   const totalLatencyMs = payload.total_ms ?? payload.latency_ms ?? pipelineLatency?.total_ms;
   const candidateMs = payload.candidate_ms ?? pipelineLatency?.candidate_ms;
   const rankingMs = payload.ranking_ms ?? pipelineLatency?.ranking_ms;
   const rerankingMs = payload.reranking_ms ?? pipelineLatency?.reranking_ms;
-  const items = rawItems.slice(0, topN).map((item, index) => ({
+  const relativeScores = toRelativeScores(
+    rawItems.map((item, index) => toFiniteScore(item.score, Math.max(0.5, 0.95 - index * 0.04))),
+  );
+  const items = rawItems.map((item, index) => ({
     id: toNumericId(item.id, item.item_id, item.product_id),
-    title: item.title ?? item.name ?? `Recommendation ${index + 1}`,
-    brand: item.brand ?? "Unknown Brand",
-    price: toCurrencyLabel(item.price),
+    title: cleanDisplayText(item.title ?? item.name, `Recommendation ${index + 1}`),
+    brand: cleanDisplayText(item.brand, "Unknown Brand"),
+    price: toCurrencyLabel(item.price, item.price_estimated),
     reason:
       item.reason_text ??
       item.reason ??
       "추천 이유 정보가 아직 제공되지 않았습니다.",
     rank: item.rank ?? index + 1,
-    score: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
+    score: relativeScores[index] ?? Math.max(0.5, 0.95 - index * 0.04),
     accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
     imageUrl: toImageUrl(item),
   }));
@@ -348,9 +396,9 @@ function normalizeSearchItems(
     responseTime,
     items: rawItems.map((item, index) => ({
       id: toNumericId(item.id, item.item_id, item.product_id),
-      title: item.title ?? item.name ?? `Search Result ${index + 1}`,
-      brand: item.brand ?? "Unknown Brand",
-      price: toCurrencyLabel(item.price),
+      title: cleanDisplayText(item.title ?? item.name, `Search Result ${index + 1}`),
+      brand: cleanDisplayText(item.brand, "Unknown Brand"),
+      price: toCurrencyLabel(item.price, item.price_estimated),
       similarity:
         typeof item.similarity === "number"
           ? item.similarity
@@ -371,18 +419,22 @@ function normalizePersonalizedSearchItems(
   responseTime: string,
   persona: string,
 ): SearchItem[] {
+  const relativeScores = toRelativeScores(
+    rawItems.map((item, index) => toFiniteScore(item.score, Math.max(0.5, 0.95 - index * 0.04))),
+  );
+
   return rawItems.map((item, index) => ({
     id: toNumericId(item.id, item.item_id, item.product_id),
-    title: item.title ?? item.name ?? `Personalized Result ${index + 1}`,
-    brand: item.brand ?? "Unknown Brand",
-    price: toCurrencyLabel(item.price),
-    similarity: typeof item.score === "number" ? item.score : Math.max(0.5, 0.95 - index * 0.04),
-    searchType: "내 취향순",
+    title: cleanDisplayText(item.title ?? item.name, `Personalized Result ${index + 1}`),
+    brand: cleanDisplayText(item.brand, "Unknown Brand"),
+    price: toCurrencyLabel(item.price, item.price_estimated),
+    similarity: relativeScores[index] ?? Math.max(0.5, 0.95 - index * 0.04),
+    searchType: "내 취향 반영",
     responseTime,
     summary:
       item.reason_text ??
       item.reason ??
-      `${persona} 신호와 현재 검색 후보를 함께 반영한 재정렬 결과입니다.`,
+      `${persona} 선호와 현재 검색 후보를 함께 반영해 재정렬한 결과입니다.`,
     accent: item.accent ?? recommendationFallbackPalette[index % recommendationFallbackPalette.length],
     imageUrl: toImageUrl(item),
   }));
@@ -390,17 +442,23 @@ function normalizePersonalizedSearchItems(
 
 function normalizeBudgetSetBundle(payload: ApiBudgetSetResponse): BudgetSetBundle {
   const sets = (payload.sets ?? []).map((setItems, setIndex) =>
-    setItems.map((item, itemIndex) => ({
-      id: toNumericId(item.id, item.article_id, item.product_id),
-      title: item.title ?? item.name ?? `Set Item ${itemIndex + 1}`,
-      brand: item.brand ?? "Unknown Brand",
-      price: toCurrencyLabel(item.price_int ?? item.price),
-      score: typeof item.score === "number" ? item.score : Math.max(0.5, 0.9 - itemIndex * 0.08),
-      category: item.category ?? "Unknown Category",
-      accent:
-        recommendationFallbackPalette[(setIndex + itemIndex) % recommendationFallbackPalette.length],
-      imageUrl: toImageUrl(item),
-    })),
+    {
+      const relativeScores = toRelativeScores(
+        setItems.map((item, itemIndex) => toFiniteScore(item.score, Math.max(0.5, 0.9 - itemIndex * 0.08))),
+      );
+
+      return setItems.map((item, itemIndex) => ({
+        id: toNumericId(item.id, item.article_id, item.product_id),
+        title: cleanDisplayText(item.title ?? item.name, `Set Item ${itemIndex + 1}`),
+        brand: cleanDisplayText(item.brand, "Unknown Brand"),
+        price: toCurrencyLabel(item.price_int ?? item.price, item.price_estimated),
+        score: relativeScores[itemIndex] ?? Math.max(0.5, 0.9 - itemIndex * 0.08),
+        category: item.category ?? "Unknown Category",
+        accent:
+          recommendationFallbackPalette[(setIndex + itemIndex) % recommendationFallbackPalette.length],
+        imageUrl: toImageUrl(item),
+      }));
+    },
   );
 
   return {
@@ -455,6 +513,44 @@ export async function fetchRecommendations(
   return normalizeRecommendationBundle(payload, topN);
 }
 
+export async function fetchResultExplanations(input: {
+  userId: string;
+  query: string;
+  persona?: string | null;
+  targetAudience?: TargetAudience;
+  items: Array<{
+    id: number;
+    title: string;
+    brand: string;
+    price: string;
+  }>;
+}): Promise<ResultExplanation[]> {
+  const response = await fetch(buildApiUrl("/api/explain-results"), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      user_id: input.userId,
+      query: input.query,
+      persona: input.persona ?? null,
+      target_audience: input.targetAudience ?? "all",
+      items: input.items,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await buildApiErrorMessage(response, "AI 추천 이유 생성 실패"));
+  }
+
+  const payload = (await response.json()) as { items?: Array<{ id: number | string; reason?: string }> };
+  return (payload.items ?? []).map((item) => ({
+    id: toNumericId(item.id),
+    reason: item.reason ?? "추천 이유 정보가 아직 제공되지 않았습니다.",
+  }));
+}
+
 export async function fetchSearchResults(params: {
   query: string;
   imageBase64?: string | null;
@@ -490,6 +586,8 @@ export async function fetchPersonalizedSearchResults(params: {
   topN: number;
   mode: "text" | "image" | "multimodal";
   personaHint?: string | null;
+  personalizationWeight?: number;
+  targetAudience?: TargetAudience;
 }): Promise<PersonalizedSearchBundle> {
   const response = await fetch(buildApiUrl("/api/personalized-search"), {
     method: "POST",
@@ -504,6 +602,8 @@ export async function fetchPersonalizedSearchResults(params: {
       top_k: params.topK,
       top_n: params.topN,
       persona_hint: params.personaHint ?? null,
+      personalization_weight: params.personalizationWeight ?? null,
+      target_audience: params.targetAudience ?? "all",
     }),
   });
 
@@ -561,6 +661,7 @@ export async function fetchOnboardingPersonaScores(input: {
   description: string;
   styleChoices: string[];
   budgetRange?: string | null;
+  targetAudience?: TargetAudience;
 }): Promise<OnboardingPersonaScores> {
   const response = await fetch(buildApiUrl("/api/onboarding"), {
     method: "POST",
@@ -573,6 +674,7 @@ export async function fetchOnboardingPersonaScores(input: {
       description: input.description,
       style_choices: input.styleChoices,
       budget_range: input.budgetRange ?? null,
+      target_audience: input.targetAudience ?? "all",
     }),
   });
 
@@ -588,6 +690,7 @@ export async function selectOnboardingPersona(input: {
   userId: string;
   persona: string;
   personaScores?: OnboardingPersonaScores;
+  targetAudience?: TargetAudience;
 }): Promise<void> {
   const response = await fetch(buildApiUrl("/api/onboarding/select"), {
     method: "POST",
@@ -599,6 +702,7 @@ export async function selectOnboardingPersona(input: {
       user_id: input.userId,
       persona: input.persona,
       persona_scores: input.personaScores ?? null,
+      target_audience: input.targetAudience ?? "all",
     }),
   });
 
@@ -611,13 +715,20 @@ export async function fetchBudgetSets(input: {
   userId: string;
   budget: number;
   setCount?: number;
+  query?: string | null;
+  targetAudience?: TargetAudience;
 }): Promise<BudgetSetBundle> {
   const url = new URL(buildApiUrl("/api/budget-set"), window.location.origin);
   url.searchParams.set("user_id", input.userId);
   url.searchParams.set("budget", String(input.budget));
   url.searchParams.set("set_count", String(input.setCount ?? 3));
+  if (input.query?.trim()) {
+    url.searchParams.set("query", input.query.trim());
+  }
+  url.searchParams.set("target_audience", input.targetAudience ?? "all");
 
   const response = await fetch(url.toString(), {
+    method: "POST",
     headers: {
       Accept: "application/json",
     },
