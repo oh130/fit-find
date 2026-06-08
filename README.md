@@ -1,15 +1,16 @@
 # 패션 도메인 Multimodal 검색 & Multi-Stage 추천 시스템
 
-> **FitFind**
-> 팀명: 사나이들
-> 팀장: 손석범
->
-> **팀 구성**
-> - 손석범 — 프론트엔드, 평가 대시보드
-> - 오승민 — API Gateway, 인프라
-> - 이준원 — 데이터 파이프라인
-> - 장지원 — 추천 모델 (Two-Tower, Ranking, Re-ranking, MAB)
-> - 홍찬근 — 검색 엔진 (CLIP + FAISS)
+**FitFind**  
+팀명: 사나이들  
+팀장: 손석범
+
+| 이름 | 담당 |
+|------|------|
+| 손석범 | 프론트엔드, 평가 대시보드 |
+| 오승민 | API Gateway, 인프라 |
+| 이준원 | 데이터 파이프라인 |
+| 장지원 | 추천 모델 (Two-Tower, Ranking, Re-ranking, MAB) |
+| 홍찬근 | 검색 엔진 (CLIP + FAISS) |
 
 ---
 
