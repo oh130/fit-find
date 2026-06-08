@@ -1,6 +1,10 @@
 ## 패션 도메인 Multimodal 검색 & Multi-Stage 추천 시스템
 
-**FitFind** · 팀명: 사나이들 · 팀장: 손석범
+프로젝트명: FitFind  
+팀명: 사나이들  
+팀장: 손석범
+
+**팀 구성**
 
 | 이름 | 담당 |
 |------|------|
@@ -9,8 +13,6 @@
 | 이준원 | 데이터 파이프라인 |
 | 장지원 | 추천 모델 (Two-Tower, Ranking, Re-ranking, MAB) |
 | 홍찬근 | 검색 엔진 (CLIP + FAISS) |
-
-<br>
 
 ---
 
@@ -39,66 +41,61 @@
 | 실시간 세션 반영 | 클릭/장바구니 이벤트 → Redis → 즉시 추천 반영 |
 | 평가 대시보드 | 검색 품질 지표, 추천 성능, A/B 테스트 결과 시각화 |
 
-
 ---
 
 ## 시스템 아키텍처
 
 ```
-사용자 (Browser)
-       │
-       ▼
+    User (Browser)
+           │
+           ▼
 ┌─────────────────────┐
-│   Frontend :3000    │  React + Vite + TypeScript
-└────────┬────────────┘
-         │ HTTP
-         ▼
+│   Frontend  :3000   │  React + Vite + TypeScript
+└──────────┬──────────┘
+           │ HTTP
+           ▼
 ┌─────────────────────────────────────────┐
-│         API Gateway :8000               │
-│  FastAPI — 단일 진입점                   │
+│           API Gateway  :8000            │
 │                                         │
-│  POST /api/search          검색          │
-│  GET  /api/recommend       개인화 추천   │
-│  POST /api/set-recommend   세트 추천     │
-│  POST /api/onboarding      페르소나 설정 │
-│  POST /api/events          이벤트 기록   │
-└────────┬────────────────────┬───────────┘
-         │                    │
-         ▼                    ▼
-┌────────────────┐   ┌────────────────────┐
-│ Search Engine  │   │    Rec-Models      │
-│    :8002       │   │      :8003         │
-│                │   │                    │
-│  CLIP 임베딩   │   │  Two-Tower 후보    │
-│  FAISS HNSW    │   │  → LogReg 랭킹     │
-│  텍스트/이미지  │   │  → Re-ranking      │
-│  멀티모달 검색 │   │  → ε-Greedy MAB   │
-└────────────────┘   └──────────┬─────────┘
-                                │
-                     ┌──────────▼─────────┐
-                     │    Redis :6379      │
-                     │   Feature Store     │
-                     │  - recent_clicks    │
-                     │  - session_interest │
-                     │  - persona profile  │
-                     └─────────────────────┘
+│  POST /api/search                       │
+│  GET  /api/recommend                    │
+│  POST /api/set-recommend                │
+│  POST /api/onboarding                   │
+│  POST /api/events                       │
+└──────────┬───────────────────┬──────────┘
+           │                   │
+           ▼                   ▼
+┌──────────────────┐  ┌─────────────────────┐
+│  Search Engine   │  │     Rec-Models      │
+│     :8002        │  │       :8003         │
+│                  │  │                     │
+│  CLIP + FAISS    │  │  Two-Tower          │
+│  HNSW index      │  │  LogReg Ranking     │
+│  Text + Image    │  │  Re-ranking         │
+│                  │  │  e-Greedy MAB       │
+└──────────────────┘  └────────┬────────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │    Redis  :6379      │
+                    │   Feature Store      │
+                    │  recent_clicks       │
+                    │  session_interest    │
+                    │  persona_profile     │
+                    └──────────────────────┘
 
-┌─────────────────────┐   ┌──────────────────────┐
-│  Dashboard :8501    │   │  Simulator           │
-│  Streamlit          │   │  행동 로그 자동 생성   │
-│  - 검색 품질 지표   │   │  - search/view/cart  │
-│  - 추천 성능 지표   │   │  - purchase events   │
-│  - A/B 테스트 결과  │   └──────────────────────┘
+┌─────────────────────┐  ┌──────────────────────┐
+│  Dashboard  :8501   │  │      Simulator       │
+│  Streamlit          │  │  auto event logging  │
+│  search metrics     │  │  search/view/cart    │
+│  rec metrics        │  │  purchase events     │
+│  A/B test results   │  └──────────────────────┘
 └─────────────────────┘
 
 ┌──────────────────────┐
-│  CT Pipeline         │
-│  성능 모니터링 &      │
-│  자동 재학습 트리거   │
+│     CT Pipeline      │
+│  monitor + retrain   │
 └──────────────────────┘
 ```
-
-<br>
 
 | 서비스 | 주소 |
 |--------|------|
@@ -110,10 +107,7 @@
 
 ---
 
-<details>
-<summary><b>실행 방법</b></summary>
-
-<br>
+## 실행 방법
 
 ### 사전 요구사항
 
@@ -121,8 +115,6 @@
 - RAM 16GB 이상 권장
 - [H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/data) 데이터셋 (Kaggle)
 - Google AI Studio에서 발급한 Gemini API 키
-
-<br>
 
 ### 1단계 — 데이터셋 배치
 
@@ -168,44 +160,3 @@ docker compose run --rm rec-models python rec_models/ranking/train_ranking.py
 ```bash
 docker compose up
 ```
-
-</details>
-
----
-
-<details>
-<summary><b>API 사용 예시</b></summary>
-
-<br>
-
-### 텍스트 검색
-
-```bash
-curl -X POST http://localhost:8000/api/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "검정 오버핏 후드티", "top_k": 10}'
-```
-
-### 개인화 추천
-
-```bash
-curl "http://localhost:8000/api/recommend?user_id=U1234&top_n=10"
-```
-
-### 예산 기반 세트 추천
-
-```bash
-curl -X POST http://localhost:8000/api/set-recommend \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "U1234", "budget": 150000, "num_sets": 3}'
-```
-
-### 이벤트 기록
-
-```bash
-curl -X POST http://localhost:8000/api/events \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "U1234", "item_id": "0706016001", "event_type": "click", "category": "상의"}'
-```
-
-</details>
