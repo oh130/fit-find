@@ -1,6 +1,15 @@
-# FitFind
+# 패션 도메인 Multimodal 검색 & Multi-Stage 추천 시스템
 
-**패션 도메인 Multimodal 검색 및 Multi-Stage 추천 시스템** — 2026-1 Capstone Design  
+> **FitFind**
+> 팀명: 사나이들
+> 팀장: 손석범
+>
+> **팀 구성**
+> - 손석범 — 프론트엔드, 평가 대시보드
+> - 오승민 — API Gateway, 인프라
+> - 이준원 — 데이터 파이프라인
+> - 장지원 — 추천 모델 (Two-Tower, Ranking, Re-ranking, MAB)
+> - 홍찬근 — 검색 엔진 (CLIP + FAISS)
 
 ---
 
@@ -283,14 +292,3 @@ curl -X POST http://localhost:8000/api/events \
 | `color_focus` | 색상 중심 선택 |
 | `category_focus` | 특정 카테고리 집중 |
 
----
-
-## 팀 구성
-
-| 이름 | 담당 파트 |
-|------|-----------|
-| 오승민 | API Gateway, Redis Feature Store, Docker Compose, 인프라 |
-| 이준원 | 데이터 파이프라인 |
-| 홍찬근 | 검색 엔진 (CLIP + FAISS) |
-| 장지원 | 추천 모델 (Two-Tower, Ranking, Re-ranking) |
-| 손석범 | 프론트엔드, 평가 대시보드 |
