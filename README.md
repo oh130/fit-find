@@ -54,20 +54,20 @@
 └──────────┬──────────┘
            │ HTTP
            ▼
-┌─────────────────────────────────────────┐
-│           API Gateway  :8000            │
-│                                         │
-│  POST /api/search                       │
-│  GET  /api/recommend                    ├────► Dashboard :8501  (Streamlit)
-│  POST /api/set-recommend                │
-│  POST /api/onboarding                   ├────► Simulator        (→ Redis)
-│  POST /api/events                       │
-└──────────┬───────────────────┬──────────┘
-           │                   │
-           ▼                   ▼
+┌─────────────────────────────────────────┐    ┌──────────────────────┐
+│           API Gateway  :8000            │    │  Dashboard  :8501    │
+│                                         ├───►│  Streamlit           │
+│  POST /api/search                       │    │  search metrics      │
+│  GET  /api/recommend                    │    │  rec metrics         │
+│  POST /api/set-recommend                │    └──────────────────────┘
+│  POST /api/onboarding                   │
+│  POST /api/events                       ├───►┌──────────────────────┐
+└──────────┬───────────────────┬──────────┘    │  Simulator           ├──► Redis
+           │                   │               │  event simulation    │
+           ▼                   ▼               └──────────────────────┘
 ┌──────────────────┐  ┌─────────────────────┐
-│  Search Engine   │  │     Rec-Models      │
-│     :8002        │  │       :8003         │
+│  Search Engine   │  │  Rec-Models         │
+│  :8002           │  │  :8003              │
 │                  │  │                     │
 │  CLIP + FAISS    │  │  Two-Tower          │
 │  HNSW index      │  │  LogReg Ranking     │
@@ -77,8 +77,8 @@
                                │
                                ▼
                     ┌──────────────────────┐
-                    │    Redis  :6379      │
-                    │   Feature Store      │
+                    │  Redis :6379         │
+                    │  Feature Store       │
                     │  recent_clicks       │
                     │  session_interest    │
                     │  persona_profile     │
@@ -86,7 +86,7 @@
                                │
                                ▼
                     ┌──────────────────────┐
-                    │     CT Pipeline      │
+                    │  CT Pipeline         │
                     │  monitor + retrain   │
                     └──────────────────────┘
 ```
