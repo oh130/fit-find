@@ -75,6 +75,7 @@ export type ResultExplanation = {
   id: number;
   reason: string;
   reason_source?: "gemini" | "local_fallback" | string;
+  geminiError?: string | null;
 };
 
 const recommendationFallbackPalette = [
@@ -141,6 +142,8 @@ type ApiSearchItem = {
   brand?: string;
   price?: string | number;
   price_estimated?: boolean;
+  reason?: string;
+  reason_text?: string;
   summary?: string;
   description?: string;
   score?: number;
@@ -419,7 +422,12 @@ function normalizeSearchItems(
             : Math.max(0.5, 0.95 - index * 0.05),
       searchType,
       responseTime,
-      summary: item.summary ?? item.description ?? "검색 결과 설명이 제공되지 않았습니다.",
+      summary:
+        item.reason_text ??
+        item.reason ??
+        item.summary ??
+        item.description ??
+        "검색 결과 설명이 제공되지 않았습니다.",
       accent: item.accent ?? searchFallbackPalette[index % searchFallbackPalette.length],
       imageUrl: toImageUrl(item),
     })),
@@ -555,10 +563,20 @@ export async function fetchResultExplanations(input: {
     throw new Error(await buildApiErrorMessage(response, "AI 추천 이유 생성 실패"));
   }
 
-  const payload = (await response.json()) as { items?: Array<{ id: number | string; reason?: string }> };
+  const payload = (await response.json()) as {
+    gemini_error?: string | null;
+    items?: Array<{
+      id: number | string;
+      reason?: string;
+      reason_source?: string;
+      gemini_error?: string | null;
+    }>;
+  };
   return (payload.items ?? []).map((item) => ({
     id: toNumericId(item.id),
     reason: item.reason ?? "추천 이유 정보가 아직 제공되지 않았습니다.",
+    reason_source: item.reason_source,
+    geminiError: item.gemini_error ?? payload.gemini_error ?? null,
   }));
 }
 

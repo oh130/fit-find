@@ -406,6 +406,11 @@ function App() {
 
       if (reasonById.size === 0) {
         setRecommendationError("현재 검색 결과에 대한 추천 이유를 생성하지 못했습니다.");
+      } else {
+        const geminiError = explanations.find((item) => item.geminiError)?.geminiError;
+        setRecommendationError(
+          geminiError ? `Gemini 생성 실패: ${geminiError}. 로컬 추천 이유를 표시합니다.` : null,
+        );
       }
     } catch (error) {
       const message =
@@ -500,7 +505,7 @@ function App() {
         <main className="flow-main">
           <section className="flow-hero">
             <p className="studio-kicker">Capstone Demo</p>
-            <h1>텍스트와 이미지로 찾고, 취향과 예산으로 좁힙니다.</h1>
+            <h1>Fit Find</h1>
             <p>
               FitFind는 멀티모달 검색, 페르소나 기반 개인화, 예산 코디 추천을 하나의 흐름으로
               연결한 패션 탐색 서비스입니다.
@@ -850,7 +855,7 @@ function App() {
               {isLoadingBudgetSets ? "구성 중" : "코디"}
             </button>
             <button type="button" onClick={loadAiRecommendations} disabled={isRefreshingRecommendations}>
-              {isRefreshingRecommendations ? "생성 중" : "이유"}
+              {isRefreshingRecommendations ? "생성 중" : "상품 이유"}
             </button>
           </div>
 

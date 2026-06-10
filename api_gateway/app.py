@@ -40,8 +40,6 @@ REC_URL = os.getenv("REC_MODELS_URL", "http://rec-models:8003")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_COOLDOWN_SECONDS = int(os.getenv("GEMINI_COOLDOWN_SECONDS", "600"))
-GEMINI_COOLDOWN_KEY = "service:gemini:cooldown"
 
 DEFAULT_IMAGE_ROOT = Path("/app/data/raw/images")
 LOCAL_IMAGE_ROOT = Path(__file__).resolve().parents[1] / "data" / "raw" / "images"
@@ -1460,30 +1458,35 @@ def _infer_session_interest_from_query_keywords(query_text: str | None) -> dict[
 
 # ── 유틸: LLM 호출 ───────────────────────────────────────────
 
-def _gemini_cooldown_ttl() -> int:
-    try:
-        ttl = feature_store.r.ttl(GEMINI_COOLDOWN_KEY)
-    except Exception:
-        return -2
-    return int(ttl or -2)
+class GeminiCallError(RuntimeError):
+    def __init__(self, status_code: int | None, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
 
 
 def _gemini_available() -> bool:
-    return bool(GEMINI_API_KEY) and _gemini_cooldown_ttl() <= 0
+    return bool(GEMINI_API_KEY)
 
 
-def _mark_gemini_cooldown(status_code: int) -> None:
-    if status_code != 429:
-        return
+def _gemini_error_detail(response: httpx.Response) -> str:
+    fallback = response.text.strip()[:500] if response.text else response.reason_phrase
     try:
-        feature_store.r.set(
-            GEMINI_COOLDOWN_KEY,
-            "quota_or_rate_limited",
-            ex=GEMINI_COOLDOWN_SECONDS,
-        )
-    except Exception:
-        pass
-    logging.warning("Gemini quota/rate limit detected. Cooling down for %s seconds.", GEMINI_COOLDOWN_SECONDS)
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or fallback)
+            status = str(error.get("status") or "")
+            if status:
+                return f"{response.status_code} {status}: {message}"
+            return f"{response.status_code}: {message}"
+        detail = payload.get("detail") or payload.get("message")
+        if detail:
+            return f"{response.status_code}: {detail}"
+    return f"{response.status_code}: {fallback}"
 
 
 async def _call_gemini(prompt: str, json_mode: bool = False, temperature: float | None = None) -> str:
@@ -1492,10 +1495,6 @@ async def _call_gemini(prompt: str, json_mode: bool = False, temperature: float 
     json_mode=True이면 JSON 외 출력을 차단해 파싱 안정성을 높인다.
     """
     if not GEMINI_API_KEY:
-        return ""
-    cooldown_ttl = _gemini_cooldown_ttl()
-    if cooldown_ttl > 0:
-        logging.info("Skipping Gemini call during cooldown. ttl=%s", cooldown_ttl)
         return ""
 
     generation_config: dict = {"temperature": temperature if temperature is not None else (0.7 if not json_mode else 0.1)}
@@ -1513,8 +1512,9 @@ async def _call_gemini(prompt: str, json_mode: bool = False, temperature: float 
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            _mark_gemini_cooldown(e.response.status_code)
-            raise
+            detail = _gemini_error_detail(e.response)
+            logging.warning("Gemini call failed: %s", detail)
+            raise GeminiCallError(e.response.status_code, detail) from e
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
@@ -2255,10 +2255,14 @@ async def personalized_search(req: PersonalizedSearchRequest):
         _attach_local_reason_text(item, limited=False)
         for item in personalized_results
     ]
+    search_results = [
+        _attach_local_reason_text(item, limited=False)
+        for item in enriched_search_results[:top_n]
+    ]
     pipeline_latency = personalized_result.get("pipeline_latency", {})
 
     response = {
-        "search_results": enriched_search_results[:top_n],
+        "search_results": search_results,
         "personalized_results": personalized_results,
         "search_latency_ms": search_result.get("latency_ms", search_result.get("total_ms")),
         "personalized_latency": pipeline_latency,
@@ -2514,6 +2518,7 @@ async def explain_results(req: ExplainResultsRequest):
         "kids": "키즈 고객",
     }.get(_normalize_target_audience(req.target_audience), "전체 고객")
 
+    gemini_error_message = ""
     if _gemini_available():
         items_desc = "\n".join(
             f"{item['rank']}. id={item['id']} | {item['name']} | "
@@ -2544,10 +2549,16 @@ async def explain_results(req: ExplainResultsRequest):
                     len(enriched_items),
                     sum(1 for reason in reasons if reason),
                 )
-        except Exception:
+        except GeminiCallError as exc:
+            gemini_error_message = exc.detail
+            logging.warning("Gemini result explanations failed. Using local fallback reasons: %s", gemini_error_message)
+            reasons = []
+        except Exception as exc:
+            gemini_error_message = f"{type(exc).__name__}: {exc}"
             logging.exception("Gemini result explanations failed. Using local fallback reasons.")
             reasons = []
     else:
+        gemini_error_message = "GEMINI_API_KEY is not configured."
         logging.info("Gemini unavailable for result explanations. Using local fallback reasons.")
         reasons = []
 
@@ -2565,10 +2576,14 @@ async def explain_results(req: ExplainResultsRequest):
         explanations.append({
             "id": item["id"],
             "reason": reason,
-            "reason_source": "gemini" if index < len(reasons) and reasons[index] else "local_fallback",
+            "reason_source": "gemini" if index < len(reasons) and reasons[index] else "gemini_error" if gemini_error_message else "local_fallback",
+            "gemini_error": gemini_error_message or None,
         })
 
-    return {"items": explanations}
+    return {
+        "items": explanations,
+        "gemini_error": gemini_error_message or None,
+    }
 
 
 @app.post("/api/events")
