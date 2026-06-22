@@ -68,7 +68,9 @@ FitFind는 패션 쇼핑에서 **"찾는 것"과 "추천받는 것"을 하나의
 
 ---
 
-## 시연 화면
+## 시연 및 주요 화면 설명
+
+https://github.com/user-attachments/assets/49e09f63-e8f5-40e4-b750-8d23659861bc
 
 **1. 취향 설정** — 자연어 입력과 태그 선택을 분석해 9개 쇼핑 성향에 비율로 매핑하고, 슬라이더로 직접 조정
 
@@ -168,7 +170,9 @@ FitFind는 패션 쇼핑에서 **"찾는 것"과 "추천받는 것"을 하나의
 
 검색 품질, 추천 성능, A/B 테스트 결과는 Streamlit 대시보드에서 한눈에 확인할 수 있습니다.
 
-![평가 대시보드](docs/screenshot_dashboard.png)
+**Streamlit 대시보드 시연**
+
+https://github.com/user-attachments/assets/f2d34896-75fa-49e6-8f5d-87fedc72b665
 
 ---
 
